@@ -1,0 +1,2147 @@
+# AI-Native SDLC Orchestration Platform
+
+## Definitive Engineering Specification — Version 3.0
+
+> **Status:** Implementation-Ready  
+> **Supersedes:** `FINAL_BLUEPRINT_V2.md` and `AI-Native_SDLC_Platform_Blueprint_FINAL.md`  
+> **Start here:** §B.3 (Task Data Model) → §B.6 (Confidence Model) → §B.2 (Fail-Closed) → §E.1 (Agent Templates) → §F.3 (Routing Rules)
+
+---
+
+# Part 0 — Comparative Analysis & Design Decisions
+
+Both prior blueprints represent serious engineering work. V3 is not a merge — it is a redesign that takes the strongest solution from each area.
+
+## 0.1 Decision Matrix: V2 vs. AI-Native (FINAL) vs. V3
+
+
+| Area                        | V2 Strength                                                                                     | AI-Native Strength                                                                                                                                   | V3 Decision                                                                                                                                                                                                                                                                         |
+| --------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Task Data Model**         | Detailed `SDLCState` TypedDict with all reducers                                                | Richer task schema with `lineage`, `budget`, `domain_shard` fields                                                                                   | **AI-Native wins.** Its `Task` model is a first-class object queryable by routing, audit, and evaluation — not just graph state. V3 adopts this with V2's `SDLCState` reducers                                                                                                      |
+| **Confidence Model**        | Requirements-phase completeness scorer only                                                     | 4-signal composite formula with calibration path, Fail-Closed behavior, and stated v1 weights                                                        | **AI-Native wins.** A load-bearing gate defined as a weighted formula with an empirical calibration path is strictly superior to a single-phase completeness rubric                                                                                                                 |
+| **Fail-Closed Principle**   | Not stated as a principle; implied by MASC                                                      | Explicit Principle 8: any internal failure routes toward more oversight, never more autonomy                                                         | **AI-Native wins.** This is the most important safety design decision in the entire platform and belongs as an axiom, not an implication                                                                                                                                            |
+| **Workflow Engine**         | Detailed `WorkflowContext` schema + `@property` derived fields                                  | `WorkflowProfile` + ordered first-match-wins `resolve_workflow_profile()` function                                                                   | **Combined.** V2's richer `WorkflowContext` schema feeds V3; AI-Native's `resolve_workflow_profile()` ordered rule function is the right execution model. V3 uses both                                                                                                              |
+| **MASC / Validation**       | Fully specified 3-check MASC engine (schema → confidence → semantic drift) with token costs     | `Validator` template as a reusable config-parametrized pattern, not bespoke classes                                                                  | **Combined.** MASC from V2 (post-node middleware, cheapest-first) + AI-Native's `Validator` template (parametrized per phase). Eliminates both the naming-without-specifying problem and the bespoke-class explosion problem                                                        |
+| **Agent Design**            | 18+ agents, all individually specified                                                          | Two reusable templates (`ApprovalGate`, `Validator`) + phase-level agent tables                                                                      | **AI-Native wins.** Bespoke agents for patterns that are the same design is unjustified complexity. V3 uses templates for patterns, full specs only for genuinely distinct agents                                                                                                   |
+| **Requirements Engine**     | Detailed question dependency graph, auto-skip via repo context, confidence-gated exit           | Same design, called "Dynamic Questioning Engine," as a dedicated phase and package                                                                   | **Combined.** V2's question dependency graph is more detailed; AI-Native's promotion to a first-class phase and package is the right architectural signal. V3 adopts both                                                                                                           |
+| **Rollback Design**         | Explicit rollback graph: failure type → reentry point + max depth                               | Two separate concerns: code rollback (git branch) vs. orchestration rollback (checkpoint replay)                                                     | **AI-Native wins** on the conceptual separation. V3 keeps the separation clearly and adds V2's explicit rollback targets                                                                                                                                                            |
+| **Memory Architecture**     | 5 memory scopes; inter-phase artifact contracts with token budgets                              | 4 physical tiers + named scope reconciliation table + Phase Handoff Packets                                                                          | **Combined.** AI-Native's `PhaseHandoffPacket` is the right mechanism. V2's token budget contracts per phase transition are the right constraints. V3 uses both                                                                                                                     |
+| **Repository Intelligence** | SCIP + Tree-sitter + KuzuDB; sharded parallel indexer; `RepositoryIntelligence` API             | Layered index (L0–L4); Tree-sitter + Zoekt + pgvector → Qdrant; NetworkX → Neo4j; federated shards; Aider-style repo map                             | **AI-Native wins on tooling.** Zoekt over SCIP for search (Zoekt is battle-proven at Sourcegraph scale); NetworkX→Neo4j migration path is cleaner than KuzuDB (less mature, embedded-only); Aider repo map is a proven token-efficiency technique. V3 adopts AI-Native's tool stack |
+| **Context Engineering**     | Full budget math derived from model window; 5-step compression pipeline; tool contracts         | AST-boundary chunking; dependency-aware expansion; hierarchical summaries; progressive loading; Phase Handoff Packets; Aider-style PageRank repo map | **Combined.** V2's budget math is the right foundation; AI-Native's compression techniques and Aider repo map are superior to V2's ad-hoc compression; V3 combines them                                                                                                             |
+| **Model Routing**           | Runtime `ModelRouter` with capability scoring × cost × risk                                     | Rule-based tiering + `escalate_model_tier()` on repeated rejection; LangChain `BaseChatModel` as adapter                                             | **Combined.** AI-Native's `escalate_model_tier()` pattern is more auditable than V2's scoring function (less black-box); LangChain as base is pragmatic. V3 uses AI-Native routing + V2's capability-requirement table as the tiering guide                                         |
+| **QA**                      | 14-tool activation matrix; regression test generation; 80% tools are deterministic              | Risk-tiered QA routing; CodeQL for deep scans alongside Semgrep; test-impact analysis via dependency graph                                           | **Combined.** V2's activation matrix; AI-Native's CodeQL (deep periodic) + Semgrep (fast inline) split; test-impact analysis from AI-Native. V3 uses all three                                                                                                                      |
+| **Deployment**              | Canary analysis (auto-promote < 5% delta; HITL 5–15%; rollback > 15%); strategy selection rules | Deployment via existing CI/CD pipelines only; no direct cloud API calls                                                                              | **Combined.** V2's canary analysis thresholds + AI-Native's "agents never call cloud APIs directly" safety boundary. Both are correct and non-redundant                                                                                                                             |
+| **Evaluation**              | Automated post-task scoring pipeline; Fix Rate; Attribution Accuracy                            | Golden dataset; shadow-mode graduation; DORA metrics; platform self-eval; feedback-loop health KPIs                                                  | **AI-Native wins.** Shadow-mode graduation (evidence-based trust escalation) is a critical safety mechanism missing from V2. Feedback-loop health KPIs are a genuine gap. V3 adopts all of AI-Native's evaluation framework                                                         |
+| **Production Readiness**    | Risk table with mitigations; RBAC matrix                                                        | Consolidated Part N with named categories; Postgres SPOF flagged for future split; consumer-group queue partitioning                                 | **AI-Native wins.** More systematic; names categories V2 missed (queue starvation, trace retention, tool supply-chain risk)                                                                                                                                                         |
+| **Tech Stack**              | Complete 35+ tool table with versions                                                           | Recommendations with rationale + alternatives tables                                                                                                 | **Combined.** V3 includes both the reasoning (AI-Native) and the versions (V2)                                                                                                                                                                                                      |
+| **Project Structure**       | V2 directory tree                                                                               | AI-Native directory tree with `requirements_engine/`, `chaos/` tests, `configs/` for versioned policies                                              | **AI-Native wins.** Cleaner separation; `chaos/` test suite and versioned policy configs are the right production engineering decisions                                                                                                                                             |
+| **UI**                      | 10 screens with WebSocket event protocol; data contracts per screen                             | 11 screens, thin read layer, clarity over visualization                                                                                              | **Combined.** AI-Native's 11 screens + V2's WebSocket protocol and data contracts. V3 keeps both                                                                                                                                                                                    |
+| **Security**                | RBAC matrix; prompt injection defense; sandboxing                                               | Sandboxing; least-privilege for MCP/tool credentials specifically; prompt injection classifier                                                       | **AI-Native adds** explicit MCP/tool credential scoping. V3 combines: RBAC from V2 + tool credential scoping from AI-Native                                                                                                                                                         |
+
+
+
+
+## 0.2 Net New Decisions in V3 (Neither Document Had These)
+
+
+| #   | Decision                                           | Rationale                                                                                                                                                                                                                                                                      |
+| --- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | **Feedback Agent** as a named role                 | Neither document adequately specified what happens *after* N consecutive failures on the same module. The AI-Native blueprint names it but only in agent tables. V3 specifies its behavior explicitly                                                                          |
+| 2   | **Structured prompt engineering strategy**         | V2 correctly identified this as a gap and added "structured outputs" but still no design. V3 adds a concrete approach: Output Schema Protocol, system role template, and context injection ordering                                                                            |
+| 3   | **Agent specialization techniques**                | Neither blueprint addressed the user's explicit request to go beyond system prompts. V3 adds a dedicated section on specialization: structured reasoning patterns, reflection, planner-executor, self-critique, and when fine-tuning is justified                              |
+| 4   | **KuzuDB → dropped in favor of NetworkX→Neo4j**    | KuzuDB is an embedded columnar graph DB. For a platform where the graph is a long-lived shared service queried concurrently across tasks (as correctly identified in AI-Native D.1), embedded-only is a design mismatch. NetworkX (MVP) → Neo4j (at scale) is the correct path |
+| 5   | **Zoekt over SCIP as the primary search engine**   | SCIP is a protocol for writing language-server symbol data; it is not a search engine. V2 incorrectly positioned SCIP as a search engine. Zoekt is a proven trigram search index; Tree-sitter provides symbol resolution. Both are needed, serving different functions         |
+| 6   | **Monitoring → spawns new Task, never loops back** | AI-Native correctly identified this. V3 makes it a design axiom: production incidents get fresh risk/confidence assessment, not an assumption that the original task's context still applies                                                                                   |
+
+
+---
+
+
+
+# Part A — Vision, Scope & Non-Goals
+
+
+
+## A.1 Vision
+
+A reliable, semi-autonomous AI Software Engineering platform that orchestrates the complete SDLC — requirements through maintenance — as a coordinated engineering organization. It optimizes for **correctness, architectural quality, reliability, maintainability, security, cost efficiency, and explainability** over raw code-generation throughput. Large-repository awareness (100k–1M+ files) is a first-class design constraint, not an optimization pass.
+
+## A.2 Core Principles
+
+1. **Planning outweighs implementation.** Reasoning budget front-loads into requirements and design. Implementation is delegated to cheaper models once design is approved.
+2. **Narrow-scoped agents, validated at every handoff.** No artifact moves to the next phase without passing a validator agent independent of the one that produced it.
+3. **Human supervision replaces prompt engineering for ambiguity.** Ambiguity triggers structured clarification, not silent assumption.
+4. **Irreversible actions require human approval, not confidence alone.** Confidence scores inform routing speed; they never unlock autonomy over production deploys, force-pushes, or data migrations.
+5. **Deterministic and auditable over clever and opaque.** Rule-based routing, policy tables, and named tools are preferred over learned/black-box equivalents wherever both are viable.
+6. **Model- and tool-independence is structural.** Enforced via adapter interfaces, not convention.
+7. **Incremental over big-bang.** Useful on a 500-file repo on day one; scales to 1M+ files by strengthening the same architecture.
+8. **Fail-Closed by Default.** Any internal scoring, policy, or validation mechanism that errors, times out, or returns malformed output routes the task toward *more* human oversight, never toward *more* autonomy. A broken Confidence Scorer does not default to "assume high confidence" — it defaults to "require approval." This applies uniformly across every Part of this document.
+
+
+
+## A.3 Non-Goals
+
+- Not a general-purpose autonomous coding agent for arbitrary unscoped requests — task/ticket-driven with structured intake.
+- Not a replacement for human architects on irreversible or high-blast-radius decisions.
+- Not a real-time interactive pair-programming tool — async, review-gated by design.
+- Multi-tenancy is explicitly deferred post-MVP.
+
+---
+
+
+
+# Part B — Core Data Model & Foundational Specifications
+
+
+
+## B.1 Task Data Model
+
+Every unit of work is a `Task` — the single most important structural decision. Nothing else (routing, memory, feedback loops, approvals, evaluation) can be specified precisely without it.
+
+```python
+from pydantic import BaseModel, Field
+from enum import Enum
+from typing import Optional
+from uuid import UUID
+from datetime import datetime
+
+class WorkType(str, Enum):
+    NEW_PROJECT   = "new_project"
+    FEATURE       = "feature"
+    BUG           = "bug"
+    HOTFIX        = "hotfix"
+    REFACTOR      = "refactor"
+    MIGRATION     = "migration"
+    TECH_DEBT     = "tech_debt"
+    MAINTENANCE   = "maintenance"
+
+class Methodology(str, Enum):
+    AGILE      = "agile"
+    WATERFALL  = "waterfall"
+    HYBRID     = "hybrid"
+
+class RiskTier(str, Enum):
+    LOW      = "low"
+    MEDIUM   = "medium"
+    HIGH     = "high"
+    CRITICAL = "critical"
+
+class TaskState(str, Enum):
+    INTAKE          = "intake"
+    REQUIREMENTS    = "requirements"
+    DESIGN          = "design"
+    IMPLEMENTATION  = "implementation"
+    QA              = "qa"
+    REVIEW          = "review"
+    RELEASE         = "release"
+    MONITORING      = "monitoring"
+    DONE            = "done"
+    BLOCKED         = "blocked"
+
+class RepoRef(BaseModel):
+    repo_id: str
+    architecture: str                  # monolith | modular_monolith | microservices
+    domain_shard: Optional[str] = None # Which RI shard this task touches (Part G.4)
+
+class TaskBudget(BaseModel):
+    token_ceiling: int       = 2_000_000  # Total tokens across all agents for this task
+    cost_ceiling_usd: float  = 20.0
+    max_retries_per_node: int = 3
+
+class ApprovalRecord(BaseModel):
+    checkpoint: str
+    approver: str
+    decision: str            # approve | reject_with_feedback | request_changes
+    evidence_ref: str        # Blackboard pointer, not inlined
+    timestamp: datetime
+
+class Task(BaseModel):
+    id: str                  = Field(max_length=255)  # PostgreSQL constraint enforced here
+    title: str
+    source: str              # user_request | ticket_import | monitoring_incident | maintenance_scan
+    type: WorkType
+    methodology: Methodology
+    repo_refs: list[RepoRef]
+    risk_tier: RiskTier
+    confidence_score: float  = 0.0   # Computed by Confidence Model (B.4)
+    state: TaskState         = TaskState.INTAKE
+    workflow_profile_id: Optional[str] = None  # Set by Workflow Policy Engine (Part F)
+    budget: TaskBudget       = Field(default_factory=TaskBudget)
+    approvals: list[ApprovalRecord] = Field(default_factory=list)
+    lineage: dict            = Field(default_factory=dict)  # {parent_task_id?, root_incident_id?}
+    artifact_refs: list[str] = Field(default_factory=list)  # Blackboard pointers
+    created_at: datetime     = Field(default_factory=datetime.utcnow)
+```
+
+**Why not a flat TypedDict:** `Task` must be queryable for routing, auditable for compliance, and validatable at write time. TypedDicts validate at type-check time only. Pydantic validates at runtime — the right behavior for a safety-critical object.
+
+## B.2 LangGraph State (`SDLCState`)
+
+`Task` is the durable record. `SDLCState` is the in-graph working state, keyed to the task, with `Annotated` reducers for parallel-safe merging.
+
+```python
+from __future__ import annotations
+from typing import Annotated, Literal, TypedDict
+from langgraph.graph.message import add_messages
+from datetime import datetime
+
+def append_only(existing: list, new: list) -> list:
+    return existing + new
+
+class RequirementsSpec(TypedDict):
+    functional: list[str]
+    non_functional: dict[str, str]    # {nfr_type: spec}
+    acceptance_criteria: list[str]
+    open_ambiguities: list[str]       # Logged in PhaseHandoffPacket on exit
+    assumptions: list[str]
+    out_of_scope: list[str]
+    version: int                      # Incremented on every mutation
+    approved_at: datetime | None
+    approved_by: str | None
+
+class ArchitectureDoc(TypedDict):
+    component_boundaries: list[dict]
+    api_contracts: list[dict]
+    database_design: dict
+    security_design: dict
+    deployment_strategy: str
+    adr_ids: list[str]
+    version: int
+    approved_at: datetime | None
+
+class TaskDecomposition(TypedDict):
+    tasks: list[dict]                 # [{id, description, module, dependencies}]
+    execution_order: list[list[str]]  # [[parallel_group], ...]
+    ownership_map: dict[str, str]     # {module_path: sub_agent_id}
+
+class QAEvidence(TypedDict):
+    static_analysis: dict | None
+    security_findings: list[dict]
+    mutation_score: float | None
+    property_violations: list[dict]
+    exploratory_findings: list[dict]
+    spec_compliance: dict
+    coverage_delta: float | None
+    risk_score: float
+    recommendation: Literal["pass", "pass_with_warnings", "fail"]
+
+class DeploymentRecord(TypedDict):
+    strategy: Literal["rolling", "blue_green", "canary"]
+    target_env: str
+    pipeline_run_id: str | None
+    canary_metrics: dict | None       # {error_rate_delta, p99_latency_delta, saturation_delta}
+    health_status: Literal["healthy", "degraded", "failed"] | None
+    rollback_triggered: bool
+    deployed_at: datetime | None
+
+class ValidationFlag(TypedDict):
+    """Output of MASC post-node validation and independent validator agents."""
+    source: str                       # "masc" | "validator_agent" | "static_tool"
+    agent_id: str
+    phase: str
+    flag_type: Literal["schema_violation", "semantic_drift", "confidence_below_threshold",
+                        "tool_error", "spec_inconsistency", "design_gap", "security_finding"]
+    severity: Literal["info", "warning", "error", "critical"]
+    detail: str
+    rollback_to: str | None           # Phase name if rollback recommended
+
+class HITLRequest(TypedDict):
+    request_id: str
+    phase: str
+    reason: str
+    evidence_ref: str                 # Blackboard pointer — not inlined
+    options: list[str]
+    response: str | None
+    responded_by: str | None
+    responded_at: datetime | NoneMASC as a quality inspector.
+
+Every agent produces output.
+    timeout_at: datetime
+
+class SDLCState(TypedDict):
+    # ── Identity ──────────────────────────────────────────────────────
+    task_id: str                      # task_id[:255] enforced at Task creation
+    workflow_profile_id: str | None
+    
+    # ── Phase Artifacts ───────────────────────────────────────────────
+    requirements: RequirementsSpec | None
+    architecture: ArchitectureDoc | None
+    task_decomposition: TaskDecomposition | None
+    implementation_results: Annotated[list[dict], append_only]
+    qa_evidence: QAEvidence | None
+    deployment_record: DeploymentRecord | None
+    
+    # ── Communication channels (append-only) ──────────────────────────
+    messages: Annotated[list, add_messages]
+    agent_events: Annotated[list[dict], append_only]
+    feedback_reports: Annotated[list[dict], append_only]  # Structured, not bare "try again"
+    
+    # ── Validation & Safety ───────────────────────────────────────────
+    validation_flags: Annotated[list[ValidationFlag], append_only]
+    rollback_count: int               # Hard cap at Task.budget.max_retries_per_node × phase_count
+    current_rollback_target: str | None
+    
+    # ── HITL ──────────────────────────────────────────────────────────
+    hitl_queue: list[HITLRequest]
+    hitl_history: Annotated[list[HITLRequest], append_only]
+    
+    # ── Intent Tracking ───────────────────────────────────────────────
+    intent_version: int
+    intent_last_updated: datetime | None
+    
+    # ── Cost Tracking ─────────────────────────────────────────────────
+    total_input_tokens: int
+    total_output_tokens: int
+    total_cost_usd: float
+    phase_costs: dict[str, float]
+```
+
+
+
+## B.3 Memory Architecture (4 Physical Tiers)
+
+
+| Tier           | Contents                                                                   | Lifetime                                       | Storage                                                      | Access Pattern                                                   |
+| -------------- | -------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------- |
+| **Working**    | `SDLCState` for active task; agent scratch reasoning                       | Task duration                                  | LangGraph state (in-memory + PostgreSQL checkpoint)          | All nodes in the active graph                                    |
+| **Episodic**   | Completed task transcripts, outcomes, regression history                   | Indefinite, task-scoped                        | PostgreSQL + pgvector index                                  | Planning/Design agents (precedent search); Evaluation (Part L)   |
+| **Semantic**   | Repository knowledge graph, architecture summaries, module ownership, ADRs | Indefinite, repo-scoped, incrementally updated | Graph DB (NetworkX→Neo4j) + Zoekt + pgvector                 | Almost every agent, via Repository Intelligence service (Part G) |
+| **Procedural** | Distilled playbooks curated from episodic patterns; versioned policy rules | Indefinite, org-scoped                         | Versioned YAML/JSON configs; human-reviewed before promotion | Workflow Policy Engine (Part F)                                  |
+
+
+**Key rules:**
+
+- LangGraph state holds only Working memory. Episodic, Semantic, and Procedural are accessed via tool calls, never inlined into graph state. Keeps checkpoint size small and resume fast.
+- Monitoring-detected incidents **do not loop back** into the original task's graph. They spawn a new `Task` linked via `lineage.root_incident_id`. A production incident requires a fresh risk/confidence assessment.
+- At each phase transition, the outgoing phase writes a **Phase Handoff Packet** (§B.5). Incoming phase reads the packet as primary context; full upstream detail is retrieval-on-demand, not force-included.
+
+
+
+### Memory Scope → Physical Tier Mapping
+
+
+| Named Scope                    | Physical Tier                                      | Lifecycle                         |
+| ------------------------------ | -------------------------------------------------- | --------------------------------- |
+| Global / Org-wide memory       | Semantic + Procedural                              | Indefinite                        |
+| Repository memory              | Semantic (per shard, §G.4)                         | Indefinite, incrementally updated |
+| Workflow / Task memory         | Working (SDLCState)                                | Task duration                     |
+| Phase memory                   | Working, scoped by phase + incoming Handoff Packet | Phase duration                    |
+| Agent scratch memory           | Working (never persisted raw)                      | Single node invocation            |
+| QA memory / Regression history | Episodic (QA slice)                                | Indefinite, feeds §K              |
+| Historical execution memory    | Episodic                                           | Indefinite, feeds §B.4 and §F     |
+
+
+
+
+## B.4 Confidence Model
+
+Composite score from four measurable signals. A load-bearing gate — used to determine when requirements are sufficient to proceed to design, when to escalate model tier, and when auto-merge is eligible.
+
+```
+confidence_score = (
+    0.35 × retrieval_coverage
+  + 0.20 × precedent_strength
+  + 0.30 × validator_agreement
+  + 0.15 × static_check_cleanliness
+)
+```
+
+- **retrieval_coverage** — did Repository Intelligence find sufficient relevant context?
+- **precedent_strength** — how similar and successful are matched past tasks in episodic memory?
+- **validator_agreement** — fraction of independent validators concurring.
+- **static_check_cleanliness** — lint/type/security pass rate on the current artifact.
+
+**Weights are v1 starter values.** Once shadow-mode data exists (§L.5), recalibrate via logistic regression against actual task outcomes. Run drop-one ablation first — `retrieval_coverage` and `validator_agreement` may correlate, effectively combining three signals.
+
+**Fail-Closed (Principle 8):** if this computation fails, errors, or any input is unavailable — `confidence_score` is **not imputed**. The task is treated as below the confidence floor. Mandatory escalation.
+
+### Phase-Specific Confidence Floors
+
+
+| Phase          | Floor | Consequence Below Floor                                        |
+| -------------- | ----- | -------------------------------------------------------------- |
+| Requirements   | 0.80  | Continue questioning; HITL after 3 rounds without improvement  |
+| Design         | 0.85  | Return to System Architect with specific gaps                  |
+| Implementation | 0.75  | Escalate model tier (§F.3); Feedback Agent after 2nd rejection |
+| QA             | 0.90  | Block deployment; HITL required                                |
+| Deployment     | 0.95  | Mandatory HITL regardless of risk tier                         |
+
+
+
+
+## B.5 Phase Handoff Packet
+
+The mechanism that bounds context growth across phase transitions. Without this, context grows unboundedly across feedback-loop revisits.
+
+```yaml
+PhaseHandoffPacket:
+  from_phase: enum[intake, requirements, design, implementation, qa, review, release]
+  to_phase: enum
+  decisions: [{topic, decision, rationale_ref}]  # rationale_ref = blackboard pointer, not inlined
+  open_assumptions: [string]                       # What confidence exit condition (b) logs
+  confidence_at_handoff: float
+  artifact_refs: [blackboard_ref]                  # Full artifacts available on demand, not injected
+  size_budget_tokens: int                          # Hard cap; lowest-relevance items drop to pointer-only
+```
+
+Incoming phase manager reads this packet as primary context. Full upstream detail is retrieved via tool call only if the incoming agent's own retrieval step determines it's actually needed.
+
+**Token cap per transition:**
+
+
+| Transition                             | Max Tokens in Packet |
+| -------------------------------------- | -------------------- |
+| Requirements → Design                  | 2,000                |
+| Design → Implementation (manager)      | 3,000                |
+| Design → Implementation (per sub-task) | 1,500                |
+| Implementation → QA                    | 2,000                |
+| QA → Deployment                        | 1,000                |
+| Any → HITL                             | 3,000                |
+
+
+
+
+## B.6 Security Model
+
+- **Execution sandboxing:** every agent that runs code or shell commands does so inside an ephemeral, network-restricted container, scoped to one task, destroyed on completion regardless of outcome.
+- **Least-privilege repo access:** short-lived, task-scoped git tokens with only the permissions the task's risk tier requires.
+- **MCP/tool credential scoping:** the same least-privilege principle applies explicitly to QA tools, static analyzers, MCP servers, and dependency scanners — not just repo tokens. A compromised linter plugin or malicious MCP server is a real attack surface.
+- **Prompt-injection defense:** issue text, PR descriptions, comments, and any external content entering Repository Intelligence is treated as untrusted data, never as instructions. A lightweight classifier flags content containing imperative/instructional patterns before it's summarized into semantic memory.
+- **Secrets redaction:** a pre-context-assembly filter strips credential-shaped strings before any repo content enters a model call.
+- **No standing production credentials.** Deployment actions execute through existing CI/CD pipelines under human-approved gates. Agents never call cloud provider APIs directly.
+- **Release governance:** agents never push to protected branches. All code changes land via pull request. Auto-merge only when: risk tier is Low, full QA suite is green, and `confidence_score > AUTO_MERGE_CEILING`. Medium/High/Critical always require human-approved merge.
+
+
+
+## B.7 Cost Governance
+
+- Every Task carries a `budget` (token ceiling, cost ceiling, max retries per node) set by the Workflow Policy Engine at intake.
+- A **kill-switch node** wraps the graph: any task exceeding budget OR a global max-node-visits count is force-routed to human-escalation state.
+- Per-task cost is tracked per agent, per phase, and exported to the evaluation framework.
+- Model routing (§F.3) defaults to cheaper models; escalates to larger models only on validator rejection or low confidence.
+
+
+
+## B.8 Observability
+
+Every graph node emits a structured OTel trace event: `{task_id, node_id, agent_id, phase, model_id, input_tokens, output_tokens, cost_usd, latency_ms, validation_result}`. Full trace retention: 90 days. Summarized episodic outcomes: indefinite. LangSmith/Langfuse for agent trace visualization and token cost per agent per task.
+
+---
+
+
+
+# Part C — Implementation Roadmap
+
+Ordered by real dependencies. Cannot build a workflow engine before agents exist; cannot evaluate before real behavior exists.
+
+
+| Phase                                  | Objective                                                    | Key Deliverables                                                                                                                                        | Dependencies     | Completion Criteria                                                                                                           |
+| -------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| **0 — Foundations**                    | Safety scaffolding before any agent writes code              | Task model (Pydantic); cost kill-switch; execution sandbox; OTel backbone; message queue scaffolding; secrets/config management                         | None             | Dummy task flows through intake → sandbox → trace log → budget-tracked completion with full audit trail                       |
+| **1 — Orchestration Skeleton**         | Working LangGraph graph with durable state and one interrupt | Parent `StateGraph`; PostgreSQL checkpointer; interrupt/resume round-trip                                                                               | Phase 0          | Task paused for approval, process killed, resumes correctly from checkpoint. 100% across 20 crash trials                      |
+| **2 — Model Abstraction Layer**        | Model-independence structural from day one                   | `ModelAdapter` interface; GLM adapter; cost tracking callback; pricing registry                                                                         | Phase 0          | Zero provider-specific SDK calls outside `model_adapters/` (grep-verifiable)                                                  |
+| **3 — Minimal Repo Intelligence**      | Working retrieval at small scale before scaling              | Tree-sitter symbol index; Zoekt trigram search; git-diff incremental indexing; pgvector store                                                           | Phases 0, 2      | Retrieval precision@5 ≥ 90% on held-out labeled set; incremental update < 10s for 20-file commit                              |
+| **4 — Dynamic Requirements Engine**    | Adaptive clarification loop, not a checklist                 | Question bank + predicates; auto-answer-from-repo check; question dependency DAG; confidence-gated exit                                                 | Phase 3          | Asks clarifying questions on ≥ 95% of ambiguous inputs; skips on ≥ 95% of well-specified inputs                               |
+| **5 — Planning & Intake Agents**       | Wire Questioning Engine into real intake                     | Planning Manager; intake classifier; Confidence Scorer; `Validator`(phase=requirements)                                                                 | Phase 4          | Confidence score computed and logged on every intake; classification accuracy validated                                       |
+| **6 — Design & Implementation Agents** | Design-driven code generation                                | Design Manager + Repo Architecture Analyst; Code Generation sub-agents; parallel fan-out + conflict detection; `Validator`(phase=design,implementation) | Phase 5          | Generated code passes static analysis on first pass ≥ 80% for Low/Medium risk                                                 |
+| **7 — Core QA Agents**                 | Incremental QA, impact analysis, bug validation              | Unit/integration test agents; Dependency Impact Agent; Bug Validation Agent; test-impact analysis                                                       | Phase 6          | QA catches ≥ 95% of seeded defects in mutation-tested benchmark                                                               |
+| **8 — HITL & Release Governance**      | Real interrupt/resume approval gates + PR flow               | `ApprovalGate` instances at all checkpoints; evidence-bundle generator; PR creation via MCP; auto-merge policy                                          | Phases 1, 7      | Zero agent-authored commits on protected branch without human approval or passing auto-merge check                            |
+| **9 — Minimal UI**                     | Orchestration legible to a human                             | 12 screens (§P) as thin read layer over existing backend objects                                                                                        | Phase 8          | Every approval decision made through UI; human can answer "what is running, why, what does it need from me"                   |
+| **10 — Workflow Policy Engine**        | Real routing logic as tested code                            | `resolve_workflow_profile()` ordered rule functions; `escalate_model_tier()`; every rule unit-tested                                                    | Phases 5–9       | Routing matches human-architect judgment ≥ 90% on labeled set; every risk×work_type×confidence combination has a passing test |
+| **11 — Repo Intelligence at Scale**    | 100k–1M+ files                                               | Federated domain shards; global index-of-indices; NetworkX → Neo4j migration; nightly full-reindex                                                      | Phase 3 proven   | Retrieval precision@5 within 5 points of Phase 3 baseline at 1M-file scale                                                    |
+| **12 — Context Engineering**           | Token efficiency without accuracy loss                       | Budget math per phase; AST-boundary chunking; Aider-style PageRank repo map; Phase Handoff Packets                                                      | Phase 11         | Average tokens/task drops ≥ 40% vs. Phase 11 baseline with no drop in task success rate                                       |
+| **13 — Advanced QA**                   | Full QA capability stack                                     | Security (Semgrep + CodeQL); performance (k6/Locust); mutation testing; property-based testing; evidence bundles                                        | Phases 7, 10     | Security scan catches ≥ 95% of seeded-vulnerability benchmark                                                                 |
+| **14 — MCP & External Integrations**   | Connect to real engineering ecosystem                        | GitHub MCP; Jira MCP; Slack for HITL notifications; adapter pattern for missing servers                                                                 | Phase 8          | End-to-end: task from real ticket → human-approved PR, no manual data re-entry                                                |
+| **15 — Evaluation Framework**          | Measure real behavior                                        | Golden dataset; shadow-mode harness; DORA metrics; platform self-eval; feedback-loop health KPIs                                                        | Phases 5–14      | Golden-dataset resolution rate is a tracked, trending metric with documented baseline                                         |
+| **16 — Production Hardening**          | Prove every mitigation works                                 | Second model adapter (zero orchestration changes); induced Postgres HA failover test; queue load test; chaos tests                                      | All prior phases | Every §N risk row has a passing chaos test, not just a design                                                                 |
+
+
+---
+
+
+
+# Part D — LangGraph System Architecture
+
+
+
+## D.1 Graph Hierarchy
+
+One Orchestrator Graph per Task, composed of subgraphs matched 1:1 to SDLC phases. Repository Intelligence is a **long-lived shared service**, not a per-task subgraph — its lifecycle (continuously updated, cross-task, federated) doesn't match a task-scoped graph.
+
+```
+Orchestrator Graph (per Task)
+├── Intake Subgraph
+├── Requirements Subgraph
+├── Design Subgraph
+├── Implementation Subgraph
+│   ├── [Send API → parallel CodeGen instances]
+│   └── [Fan-in → Conflict Check → Integration Validator]
+├── QA Subgraph
+│   └── [Send API → parallel QA tool runners]
+├── Review Subgraph
+├── Release Subgraph
+└── Monitoring Subgraph
+
+Repository Intelligence Service (shared, federated, never task-scoped)
+  └── queried via tool calls from any subgraph
+```
+
+
+
+## D.2 State & Conditional Routing
+
+One subgraph per phase. The `WorkflowProfile` (§F.1) sets a flag per node (`active | skipped | parallel_eligible`) consumed by conditional edges *inside* that single subgraph. **Not** maintained as multiple subgraph variants — same flexibility, one fewer moving part.
+
+## D.3 Phase State Machine
+
+```
+intake → requirements → design → implementation → qa → review → release → monitoring → done
+
+Backward edges (explicit, not implicit):
+  QA fail → implementation  (default)
+  QA flags design defect → design (HITL required)
+  Review changes-requested → implementation
+  Design validator flags requirement gap → requirements (HITL required)
+  Monitoring incident → new Task (linked via lineage), NOT back to original graph
+```
+
+**Rollback precision (§2.5 from V2, kept and extended):**
+
+
+| Failure                            | Reentry Point                    | Max Depth | HITL        |
+| ---------------------------------- | -------------------------------- | --------- | ----------- |
+| Requirements Validator             | Clarification node (same phase)  | Unlimited | No          |
+| Design Validator — design gap      | System Architect node            | 5×        | No          |
+| Design Validator — requirement gap | Requirements phase               | 1×        | Yes         |
+| Code Review / static fail          | Implementation Agent (same task) | 3×        | No          |
+| Integration Validator              | Implementation Manager           | 2×        | No          |
+| QA — spec compliance fail          | Implementation phase             | 3×        | No          |
+| QA — design defect                 | Design phase                     | 1×        | Yes         |
+| QA — critical security finding     | Design phase                     | 1×        | Yes         |
+| Deployment health fail             | CI/CD rollback (automated)       | Auto      | No          |
+| Confidence below floor (any phase) | Previous checkpoint              | 1×        | Yes         |
+| MASC critical anomaly              | Previous phase checkpoint        | 1×        | Yes         |
+| `rollback_count ≥ max`             | Suspend task, preserve state     | —         | Yes (force) |
+
+
+
+
+## D.4 Parallel Execution & Conflict Handling
+
+Fan-out via `Send` API for: independent implementation sub-tasks, parallel QA tool runners, embedding generation.
+
+Fan-in aggregator node: explicitly checks for overlapping file edits across branches before merging. Overlapping branches are serialized and re-run sequentially, not silently merged.
+
+At high task volume, concurrent graphs hit shared Repository Intelligence stores. Mitigation: read/write separation (incremental-indexing writes → primary; agent-execution reads → replicas).
+
+## D.5 Retry & Failure Routing
+
+Per-node `retry_policy` (LangGraph native) with exponential backoff; max attempts from `Task.budget.max_retries_per_node`. After retry exhaustion:
+
+1. Route to Feedback Agent (synthesizes correction from failure history).
+2. If Feedback Agent's revised approach still fails → human escalation (Fail-Closed, Principle 8).
+
+
+
+## D.6 Code Rollback vs. Orchestration Rollback (Kept Separate)
+
+
+| Concern                          | Mechanism                                           |
+| -------------------------------- | --------------------------------------------------- |
+| **Code rollback**                | Git branch per task; revert = discard/revert branch |
+| **Orchestration-state rollback** | LangGraph checkpoint replay from any prior step     |
+
+
+Never conflate these. LangGraph checkpoints are for debugging and resuming the process, not for undoing code.
+
+## D.7 Human Approval Nodes
+
+`interrupt()` calls immediately before irreversible transitions (design approval, release, deployment). Rendered via `ApprovalGate` template (§E.1). Resume via `Command(resume=...)`. Rendered concretely in §P.
+
+## D.8 Feedback Reports (Structured, Not Bare)
+
+Every feedback loop carries a `FeedbackReport`:
+
+```python
+class FeedbackReport(TypedDict):
+    loop_id: str                # e.g., "QA_to_Implementation"
+    failed_agent: str
+    failure_type: str
+    validator_findings: list[dict]
+    specific_gaps: list[str]    # What exactly to fix, not "try again"
+    suggested_approach: str | None
+    attempt_number: int
+```
+
+Agents receive structured findings, not bare retry signals.
+
+## D.9 Agent Communication Protocol
+
+Structured Pydantic schemas through shared state. Large payloads (diffs, logs, QA evidence) stored in a **blackboard** (artifact store) and referenced by pointer. Never inlined into graph state.
+
+---
+
+
+
+# Part E — Agent Architecture
+
+
+
+## E.1 Agent Templates (Two Patterns, Config-Parametrized)
+
+All "approval" and "validation" roles are instances of two templates. This eliminates the bespoke-class explosion while maintaining **full independence**: each template instance is its own graph node, evaluated independently of the producing agent.
+
+```yaml
+ApprovalGate:           # replaces N bespoke approval-agent classes
+  checkpoint: enum[scope, design, security, release, pr, deployment]
+  evidence_bundle_spec: ref          # what's shown: diff, QA results, confidence breakdown, precedent tasks
+  applies_when: <rule from §F.3>    # which risk tier / confidence band triggers this gate
+  decision_options: [approve, reject_with_feedback, request_changes]
+  timeout_minutes: int               # Fail-Closed: if timeout expires → escalate, never auto-approve
+
+Validator:              # replaces N bespoke validator-agent classes
+  phase: enum[requirements, design, implementation, qa]
+  rule_set: ref         # consistency-checker | design-checklist | static-analysis | qa-plan-compliance
+  independent_of: <producing_agent>  # structurally enforced
+  on_failure: enum[feedback_loop, hitl, suspend]
+```
+
+
+
+## E.2 Agent Granularity Principles
+
+- **One Manager per SDLC phase** for coordination and as the graph's boundary.
+- **Sub-agents only where tool or context requirements genuinely differ.** Security QA needs different tools than Unit Test — real split. Two agents processing different files is parallelism (fan-out), not a split.
+- **Validators are always separate from the producing agent.**
+- **Human approval agents only at genuinely irreversible or high-blast-radius transitions.**
+- **Feedback Agent** is a named, distinct role — what happens after N consecutive failures on the same module (see §E.5).
+
+
+
+## E.3 Agent Specialization Techniques
+
+Beyond system prompts, these techniques measurably improve agent reliability. Recommended where cost/complexity is justified.
+
+### Structured Reasoning Patterns
+
+
+| Technique                                          | When to Use                                                  | Implementation                                                                                                                                          |
+| -------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **ReAct (Reason + Act)**                           | All implementation and retrieval agents                      | Standard; already native to LangGraph tool-calling nodes                                                                                                |
+| **Chain-of-Thought**                               | Design agents, Security Architect, Confidence Scorer         | Prefix output schema with `reasoning: str` field that the agent must populate before conclusions                                                        |
+| **Planner-Executor split**                         | Implementation Manager → CodeGen sub-agents                  | Manager plans (high-capability model); Executors implement (cheaper model). Already in architecture                                                     |
+| **Reflection / Self-Critique**                     | Requirements Architect after drafting spec; Design Validator | Add a second LLM call: "Review your answer for gaps or contradictions before finalizing." Only for high-stakes outputs — adds cost                      |
+| **Multi-step validation (Validator-of-Validator)** | Critical security design, production migration               | `Validator`(design) → MASC check on validator's output. Prevents a validator failing silently                                                           |
+| **Structured output schemas**                      | All agents                                                   | Every agent output is a Pydantic schema defined in `agents/prompts/schemas/`. MASC Check 1 validates against this schema before any output enters state |
+
+
+
+
+### Specialized Tools (Restricts Scope Intentionally)
+
+- Each agent receives only the tools its role requires. A Code Review Agent does not receive code-write tools. An Implementation Agent does not receive deployment tools.
+- Tool access is defined in agent config, enforced at the LangGraph node level, not by prompt instruction.
+
+
+
+### Specialized Retrieval
+
+- **Requirements Architect:** semantic search over historical requirements + similar task episodic memory. Does not receive raw codebase access.
+- **Design Manager:** structural graph queries (architecture, component relationships, ADRs). Semantic search for similar past designs.
+- **CodeGen Sub-agents:** progressive context expansion tools only (symbol signatures → bodies on demand). Bounded context budget (§H.2).
+- **Security Architect:** STRIDE threat model prompt; retrieval scoped to security patterns and historical security findings only.
+- **QA agents:** access to test history, regression history, and diff. No access to broader codebase.
+
+
+
+### When Fine-Tuning Is Justified
+
+Fine-tuning is high-cost to maintain and not justified for most agents. It is justified when:
+
+1. **High-volume, narrow-task agents** with well-defined I/O: e.g., Intent Drift Classifier (classifies each new user message as ADDITIVE/MODIFICATION/CONTRADICTION). Thousands of examples exist; the task is well-bounded.
+2. **Output format compliance** where few-shot prompting consistently fails: if a CodeGen sub-agent repeatedly fails to produce valid diffs in the expected format despite schema enforcement, fine-tuning on format is cheaper than repeated validation loops.
+3. **Domain-specific security reasoning**: if the organization has a corpus of security findings specific to their stack, a fine-tuned Security Architect is measurably more accurate than a general model.
+
+Not justified for: Design reasoning, Requirements clarification, Deployment planning — these require broad knowledge that fine-tuning narrows.
+
+### Knowledge Injection
+
+- **Architecture knowledge:** injected via the Level 0 architecture summary (AST-generated, never LLM-generated) at the start of every agent context.
+- **Design Decision Records:** queried from semantic memory by Design and Implementation agents as part of progressive context loading.
+- **Regression patterns:** queried from episodic memory by QA Manager at phase start.
+
+
+
+### Guardrails (Output Validation)
+
+All outputs pass through MASC (§E.6) before entering state. MASC is the primary guardrail layer. For external-facing outputs (PR descriptions, human-readable summaries), an additional sanitization pass removes credential-shaped strings and instructional content.
+
+## E.4 Dynamic Requirements Questioning Engine
+
+The requirements phase is the platform's most important phase and historically its most under-specified component.
+
+### Question Bank Structure
+
+Organized by category: business objective, functional requirements, non-functional requirements, security/compliance, performance, scalability, reliability, data integrity, API contracts, deployment constraints. Each question tagged with:
+
+```python
+@dataclass
+class Question:
+    id: str
+    text: str
+    category: str
+    applies_if: Callable[[WorkflowContext], bool]
+    auto_answerable_from: str | None  # "repo_intelligence" | None
+    depends_on: list[str]             # Question IDs that must be answered first
+```
+
+
+
+### Auto-Answer Before Asking
+
+Before any question reaches a human, the engine checks whether Repository Intelligence can answer it with high confidence:
+
+- Tech stack, existing API contracts, current test coverage, existing patterns — directly retrievable from semantic memory.
+- Questions the repo can answer are skipped (not "hidden" — the UI shows them as "auto-answered from repo" with the retrieved answer, so the human can see the platform did real work).
+- Only questions the repo cannot answer (business objectives, non-functional targets, org constraints, policy decisions) reach the human.
+
+
+
+### Question Dependency DAG (Partial)
+
+```
+Q1: Primary objective (always)
+  └─ IF touches auth/payments/PII → Qsec1: Compliance requirements
+       └─ Qsec2: Data classification
+            └─ Qsec3: Regulatory constraints (GDPR, PCI)
+
+Q2: User/consumer of this change (always)
+
+Q3: Acceptance criteria (always)
+  └─ IF work_type in [feature, new_project]:
+       ├─ Q4: Performance targets
+       ├─ Q5: Scalability expectations
+       └─ Q6: Availability requirements (SLA, RTO, RPO)
+  └─ IF work_type == bug:
+       ├─ Q4b: Reproduction steps
+       ├─ Q5b: Expected vs. actual behavior
+       └─ Q6b: When did it start?
+  └─ IF work_type == hotfix:
+       ├─ Q7h: Blast radius
+       └─ Q8h: Temporary workaround available?
+
+IF repo_architecture == microservices AND affected_modules > 1:
+  ├─ Qint1: Services requiring atomic update
+  ├─ Qint2: API versioning requirements
+  └─ Qint3: External consumers?
+
+IF has_database_changes:
+  ├─ Qdb1: Additive or modify/drop migration?
+  ├─ Qdb2: Data volume affected?
+  └─ Qdb3: Zero-downtime required?
+```
+
+
+
+### Exit Conditions (3-way, from original spec)
+
+Stop when **any one** is satisfied:
+
+1. `confidence_score ≥ floor[requirements] = 0.80` AND all mandatory questions for this work type are answered.
+2. Human explicitly accepts remaining open assumptions (logged in Phase Handoff Packet).
+3. Confidence cannot be raised further → `interrupt()` for HITL review.
+
+**Fail-Closed on the exit evaluator:** if the confidence scorer fails, condition (1) cannot be satisfied → always exits via condition (3) (HITL).
+
+## E.5 Feedback Agent
+
+The named agent that handles repeated failure on the same module — explicitly specified here because neither prior document did so.
+
+- **Trigger:** N consecutive failures on the same module (N = `Task.budget.max_retries_per_node`).
+- **Input:** Full failure history for this task and module; episodic memory of similar past failures and how they were resolved.
+- **Reasoning:** "What is the root pattern across these failures, and what fundamentally different approach should the CodeGen sub-agent try?"
+- **Output:** Revised `TaskDecomposition` entry with a different approach, additional context pointers, and explicit constraints.
+- **If Feedback Agent's output also fails:** escalate to human (Fail-Closed). Never loop indefinitely.
+- **Model tier:** High-capability (GLM-4.7) — root-cause reasoning across a failure history requires broad reasoning.
+
+
+
+## E.6 MASC: Metacognitive Self-Correction Engine
+
+Runs as post-node middleware in LangGraph — not as a separate agent. Validates outputs before they enter `SDLCState`. Three checks, cheapest first.
+
+```python
+class MASCEngine:
+    """Post-node output validator. Cheapest-first to minimize token cost."""
+    
+    CONFIDENCE_THRESHOLDS = {
+        "requirements": 0.80, "design": 0.85,
+        "implementation": 0.75, "qa": 0.90, "deployment": 0.95,
+    }
+    HIGH_STAKES_PHASES = {"design", "implementation_plan", "deployment"}
+    
+    def validate(self, output: dict, agent_id: str, phase: str,
+                 state: SDLCState) -> tuple[bool, ValidationFlag | None]:
+        
+        # Check 1: Schema validation — zero tokens
+        if not self._validate_schema(output, agent_id):
+            return False, ValidationFlag(
+                source="masc", flag_type="schema_violation", severity="error", ...)
+        
+        # Check 2: Confidence gating — zero tokens
+        if output.get("confidence", 1.0) < self.CONFIDENCE_THRESHOLDS.get(phase, 0.80):
+            return False, ValidationFlag(
+                source="masc", flag_type="confidence_below_threshold", severity="warning", ...)
+        
+        # Check 3: Semantic drift — fast model only (~200 tokens), high-stakes phases only
+        if phase in self.HIGH_STAKES_PHASES:
+            if self._check_semantic_drift(output, state["requirements"], state["intent_version"]):
+                return False, ValidationFlag(
+                    source="masc", flag_type="semantic_drift", severity="error", ...)
+        
+        return True, None
+    
+    # Fail-Closed: if MASC itself errors → treat as severity="error", route to human
+```
+
+
+
+## E.7 Intent Tracker
+
+Maintains requirements as an evolving belief state. Prevents intent drift from corrupting ongoing implementation.
+
+```python
+class IntentTracker:
+    """Runs on every new user message, including HITL responses."""
+    
+    def classify(self, new_message: str, current_spec: RequirementsSpec) -> IntentDiff:
+        # Structured extraction: classify each claim as:
+        # ADDITIVE | MODIFICATION | CONTRADICTION | IRRELEVANT
+        # MODIFICATION/CONTRADICTION: require explicit human confirmation before applying
+        # Increments intent_version on any spec mutation
+        ...
+    
+    def flag_drift_mid_implementation(self, diff: IntentDiff, state: SDLCState) -> ValidationFlag | None:
+        # If CONTRADICTION detected during implementation → ValidationFlag(flag_type="semantic_drift")
+        # Triggers FL-11: rollback to requirements phase with HITL
+        ...
+```
+
+
+
+## E.8 Full Agent Roster by Phase
+
+*Every* `ApprovalGate` *and* `Validator` *entry is a template instance, not a separately implemented class.*
+
+### Phase: Intake & Planning
+
+
+| Agent                     | Responsibility                                      | Input → Output                                                 | Model Tier      | Tools                                        | Exit / Failure                                                                         |
+| ------------------------- | --------------------------------------------------- | -------------------------------------------------------------- | --------------- | -------------------------------------------- | -------------------------------------------------------------------------------------- |
+| **Planning Manager**      | Coordinates intake through requirements-ready state | Raw request → classified Task                                  | Fast            | Task classifier, Risk model, Episodic memory | Exit: Task classified. Failure: unresolvable → HITL (Fail-Closed)                      |
+| **Requirements Analyst**  | Runs Dynamic Questioning Engine (§E.4)              | Raw request + repo context → RequirementsSpec + Handoff Packet | High-capability | Repo Intelligence, Questioning Engine        | Exit: 3-way condition met. Failure: user unresponsive → held open; never auto-proceeds |
+| **Intent Tracker**        | Detects mutations in user intent across turns       | New message + current spec → IntentDiff                        | Fast            | None (reads state only)                      | Exit: classified and stored. Failure: ambiguous → MODIFICATION, requires HITL          |
+| **Confidence Scorer**     | Computes composite confidence score (§B.4)          | Spec + retrieval coverage + precedent → confidence_score       | Fast            | Retrieval metrics, episodic lookup           | Exit: score computed. Failure (Fail-Closed): treated as below floor                    |
+| `Validator`(requirements) | Independent consistency check                       | RequirementsSpec → pass/fail + gaps                            | Fast            | Consistency checker                          | Failure: FeedbackReport to Requirements Analyst                                        |
+| `ApprovalGate`(scope)     | Sign-off on scope before design spend               | Requirements + assumption log                                  | —               | Interrupt/resume (§D.7)                      | When: risk ≥ Medium. Failure: reject → Requirements Analyst                            |
+
+
+
+
+### Phase: Architecture & Design
+
+
+| Agent                         | Responsibility                                                                          | Input → Output                                                | Model Tier      | Tools                                                               | Exit / Failure                                                                  |
+| ----------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------- | --------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| **Design Manager**            | Coordinates design; allocates heavy reasoning budget                                    | Approved requirements → design package                        | High-capability | —                                                                   | Exit: design package complete. Failure: repeated rejection → HITL               |
+| **Repo Architecture Analyst** | Grounds design in actual codebase structure                                             | Requirements + repo graph → architecture-fit analysis         | Fast            | Repo Intelligence (structural queries, 2-hop from affected modules) | Exit: analysis attached. Failure: low-confidence retrieval → flagged            |
+| **Security Architect**        | Threat modeling; security design addendum; compliance check                             | ArchitectureDoc + security classification → security addendum | High-capability | Semgrep (existing patterns); STRIDE model                           | When: `security_classification ≠ low` OR `touches_shared_infra`. Skip otherwise |
+| `Validator`(design)           | Checks design against system-design checklist (boundaries, contracts, failure handling) | Design package → pass/fail + gaps                             | High-capability | Checklist evaluator                                                 | Failure: FeedbackReport to Design Manager; 5× max before HITL                   |
+| `ApprovalGate`(design)        | Architecture sign-off                                                                   | Design package + findings                                     | —               | Interrupt/resume                                                    | When: risk ≥ Medium                                                             |
+
+
+
+
+### Phase: Implementation
+
+
+| Agent                       | Responsibility                                                          | Input → Output                                                | Model Tier                                         | Tools                                                                                   | Exit / Failure                                                                                           |
+| --------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **Implementation Manager**  | Decomposes design into tasks; dependency-aware execution ordering       | Approved design → TaskDecomposition                           | High-capability                                    | `get_dependencies`, `get_dependents`                                                    | Exit: no circular deps; all components covered. Failure: overlapping ownership → resolve before dispatch |
+| **CodeGen Sub-agent (×N)**  | Implements one module/scope per instance (parallel via Send API)        | Module spec + progressive context → diff                      | Fast (simple) / High-capability (complex refactor) | `get_symbol_signature`, `get_symbol_body`, `get_callers`, `get_file_structure`, sandbox | Exit: diff produced; self-check clean. Failure 3×: Feedback Agent                                        |
+| `Validator`(implementation) | Static validation: lint/type/security (independent of CodeGen)          | Diff → pass/fail + findings                                   | None (tools only)                                  | ruff, mypy, Semgrep                                                                     | Failure: FeedbackReport to CodeGen sub-agent; 3× max                                                     |
+| **Feedback Agent**          | Synthesizes root cause of repeated failure; proposes different approach | Failure history + episodic memory → revised task instructions | High-capability                                    | Episodic memory                                                                         | Trigger: N consecutive failures on same module. Failure: HITL escalation                                 |
+| **Integration Validator**   | Verifies new code integrates correctly; catches interface mismatches    | All merged diffs + interface contracts → pass/fail            | High-capability                                    | `get_callers`, `get_callees`, sandbox integration tests                                 | Failure: FeedbackReport to Implementation Manager                                                        |
+
+
+
+
+### Phase: QA & Testing
+
+
+| Agent                                  | Responsibility                                                      | Input → Output                              | Model Tier                                       | Tools                               | Exit / Failure                                                                              |
+| -------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------- |
+| **QA Manager**                         | Computes QA depth from risk tier; dispatches sub-agents             | Task + risk tier → QA plan                  | Fast                                             | Workflow Policy Engine              | Exit: QA plan executed. Any sub-agent critical-fail → routes to implementation              |
+| **Bug Validation Agent**               | Reproduces reported bug *before* any fix                            | Bug report + repo → reproduction result     | High-capability                                  | Sandbox execution                   | When: work_type = bug/hotfix. Not-reproduced → return task to requirements                  |
+| **Dependency Impact Agent**            | BFS traversal; expands test scope to affected downstream components | Diff + dependency graph → expanded scope    | None (graph traversal)                           | `get_impact_set`, Repo Intelligence | Exit: expanded scope defined                                                                |
+| **Unit/Integration Test Agent**        | Runs and extends test coverage, test-impact-analysis scoped         | Diff + test suite → results                 | Fast                                             | pytest, test-impact-analysis        | Exit: green. Failure: FeedbackReport to implementation                                      |
+| **Security/Performance QA sub-agents** | Risk-gated deep checks                                              | Diff + risk tier → findings                 | Fast (Semgrep inline) / None (CodeQL runs async) | Semgrep, CodeQL, k6/Locust          | When: risk ≥ Medium (Security); risk ≥ High (Performance)                                   |
+| **Spec QA Agent**                      | Verifies implementation matches requirements; detects scope creep   | Diff + RequirementsSpec → compliance report | High-capability                                  | Structured comparison               | Always runs. Failure → FeedbackReport to implementation; 3× → Design phase if design defect |
+| `Validator`(qa)                        | Confirms QA plan matches risk tier requirements                     | QA plan + results → plan-compliance check   | Fast                                             | Policy checker                      | Failure: QA Manager re-runs missing checks                                                  |
+| `ApprovalGate`(release)                | Gate before Review phase                                            | Full QA evidence bundle                     | —                                                | Interrupt/resume                    | When: risk ≥ Medium                                                                         |
+
+
+
+
+### Phase: Review, Release & Monitoring
+
+
+| Agent                       | Responsibility                                                                   | Input → Output                                         | Model Tier      | Tools                                      | Exit / Failure                                                              |
+| --------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------ | --------------- | ------------------------------------------ | --------------------------------------------------------------------------- |
+| **Review Manager**          | Coordinates diff review against design + standards                               | Diff + design + QA evidence → review outcome           | High-capability | Repo Intelligence, style/standards checker | Exit: approved for release. Failure: changes-requested → implementation     |
+| **Merge Conflict Resolver** | Handles overlapping-branch conflicts from fan-in                                 | Conflicting diffs → resolved diff or serialized re-run | Fast            | Diff/merge tools                           | Exit: resolved or re-run scheduled. Failure: HITL escalation                |
+| `ApprovalGate`(pr)          | Standard PR review; mandatory for Medium+ risk                                   | PR + evidence bundle                                   | —               | Git provider MCP                           | Failure: changes-requested → implementation                                 |
+| **Release Manager**         | Coordinates deployment via existing CI/CD                                        | Merged PR → deployment plan + strategy selection       | High-capability | CI/CD adapter (never direct cloud API)     | Exit: deployed. Failure: automated rollback trigger                         |
+| **Rollback Sub-agent**      | Executes rollback plan on deployment failure or incident                         | Deployment + rollback plan → reverted state            | Fast            | CI/CD adapter                              | Failure: IMMEDIATE human escalation                                         |
+| `ApprovalGate`(deployment)  | **Mandatory for every production deploy regardless of confidence (Principle 4)** | Deployment plan + evidence                             | —               | Interrupt/resume                           | Always fires for production. Timeout → hold, never auto-approve             |
+| **Monitoring Manager**      | Watches deployed change for bake-in period; canary analysis                      | Deployment + telemetry → incident/no-incident          | Fast            | OTel pipeline                              | Exit: bake-in clean. Incident → **new Task** via lineage (never loops back) |
+
+
+---
+
+
+
+# Part F — Dynamic Workflow Engine
+
+
+
+## F.1 WorkflowProfile
+
+Computed once at intake, attached to Task, consumed by every downstream node.
+
+```yaml
+WorkflowProfile:
+  agent_set: [...]                     # which specialist/validator agents are active
+  execution_order: sequential | parallel_where_independent
+  qa_depth: minimal | standard | deep | exhaustive
+  model_tier: fast_cheap | balanced | frontier
+  approval_requirements: [checkpoint...]
+  max_parallelism: int                 # capped by repo_scale (§F.4)
+  cost_budget_usd: float               # derived from risk tier and work type
+```
+
+
+
+## F.2 WorkflowContext Schema
+
+```python
+from pydantic import BaseModel, computed_field
+
+class WorkflowContext(BaseModel):
+    # Task properties
+    work_type: WorkType
+    methodology: Methodology
+    risk_tier: RiskTier
+    confidence_score: float = 0.0
+    
+    # Repository properties
+    repo_architecture: str         # monolith | modular_monolith | microservices
+    repo_scale: str                # small(<1k) | medium(<10k) | large(<100k) | enterprise(100k+)
+    affected_module_count: int = 0
+    dependency_fan_out: int = 0
+    touches_shared_infra: bool = False
+    has_database_changes: bool = False
+    has_api_contract_changes: bool = False
+    has_ui_changes: bool = False
+    is_greenfield: bool = False
+    
+    # Engineering constraints
+    production_criticality: str    # low | medium | high | critical
+    requires_backward_compat: bool = False
+    has_external_consumers: bool = False
+    
+    # Derived properties
+    @computed_field
+    def requires_full_design_phase(self) -> bool:
+        return (self.is_greenfield
+                or self.work_type in [WorkType.MIGRATION, WorkType.NEW_PROJECT]
+                or (self.risk_tier in [RiskTier.HIGH, RiskTier.CRITICAL]
+                    and self.touches_shared_infra))
+    
+    @computed_field
+    def max_parallel_impl_agents(self) -> int:
+        scale_caps = {"enterprise": 8, "large": 5, "medium": 3, "small": 2}
+        return scale_caps.get(self.repo_scale, 3)
+```
+
+
+
+## F.3 Decision Rules (Ordered, First-Match-Wins)
+
+Implementable directly as code. Every pair of rules is unit-tested for non-overlap.
+
+```python
+def resolve_workflow_profile(task: Task, ctx: WorkflowContext) -> WorkflowProfile:
+    profile = WorkflowProfile.most_conservative()  # Fail-Closed default (Principle 8)
+    
+    # Rule 1 — Critical risk: maximum caution, regardless of confidence
+    if task.risk_tier == RiskTier.CRITICAL:
+        profile.approval_requirements = [SCOPE, DESIGN, SECURITY, RELEASE, DEPLOYMENT]
+        profile.qa_depth = EXHAUSTIVE
+        profile.model_tier = FRONTIER
+        return profile
+    
+    # Rule 2 — Production hotfixes: never auto-merge, fast path, Bug Validation always runs
+    if task.type == WorkType.HOTFIX and is_production(task.repo_refs):
+        profile.approval_requirements += [DEPLOYMENT]
+        profile.execution_order = SEQUENTIAL_FAST_PATH
+        profile.qa_depth = STANDARD_PLUS_BUG_VALIDATION
+        return profile
+    
+    # Rule 3 — Low confidence (or scorer failed): escalate regardless of risk tier
+    if ctx.confidence_score < CONFIDENCE_FLOOR or ctx.confidence_score is None:
+        profile.approval_requirements += [SCOPE, DESIGN]
+        return profile
+    
+    # Rule 4 — Low risk + high confidence: auto-merge eligible (still logged/revertible)
+    if task.risk_tier == RiskTier.LOW and ctx.confidence_score > AUTO_MERGE_CEILING:
+        profile.approval_requirements = []
+        profile.model_tier = FAST_CHEAP
+        return profile
+    
+    # Rule 5 — Default: standard Medium-risk path
+    profile.approval_requirements += [RELEASE, PR]
+    profile.qa_depth = STANDARD
+    profile.model_tier = BALANCED
+    return profile
+
+def escalate_model_tier(node_state: NodeExecutionState) -> ModelTier:
+    """Escalation-on-Repeated-Rejection: escalates when validators repeatedly reject."""
+    if node_state.validator_rejections >= 2 and node_state.model_tier == FAST_CHEAP:
+        return BALANCED
+    if node_state.validator_rejections >= 2 and node_state.model_tier == BALANCED:
+        return FRONTIER
+    if node_state.validator_rejections >= node_state.task.budget.max_retries_per_node:
+        route_to(FEEDBACK_AGENT)  # then HITL if still failing — Fail-Closed
+    return node_state.model_tier
+```
+
+
+
+## F.4 Agent Selection Rules
+
+
+| Condition                  | Add Agent                                                    | Skip Agent                                            |
+| -------------------------- | ------------------------------------------------------------ | ----------------------------------------------------- |
+| `work_type == hotfix`      | Bug Validation Agent, Rollback Sub-agent                     | Full Design phase, Security Architect                 |
+| `risk_tier >= HIGH`        | Security QA, Performance QA, Exploratory Testing             | —                                                     |
+| `risk_tier == LOW`         | —                                                            | Mutation Testing, Exploratory Testing, Performance QA |
+| `has_database_changes`     | DB Migration Validator                                       | —                                                     |
+| `has_api_contract_changes` | API Contract Validator (schemathesis), Consumer Notification | —                                                     |
+| `has_ui_changes`           | UI QA (Playwright), Accessibility QA (axe-core)              | —                                                     |
+| `repo_scale == enterprise` | Shard Coordinator (§G.4)                                     | —                                                     |
+| `is_greenfield`            | Architecture Decision Agent                                  | Regression Analyst                                    |
+| `methodology == waterfall` | Stage Gate Enforcer                                          | —                                                     |
+| `touches_shared_infra`     | Security Architect (forced active)                           | —                                                     |
+
+
+
+
+## F.5 Feedback Loop Registry
+
+Every loop is named, parametrized, and registered. Not scattered through agent code.
+
+
+| Loop ID | Trigger                        | Source Agent                | Target Agent           | Max Iterations | Rollback Depth  | HITL? |
+| ------- | ------------------------------ | --------------------------- | ---------------------- | -------------- | --------------- | ----- |
+| FL-01   | Requirements spec gaps         | `Validator`(requirements)   | Requirements Analyst   | Unlimited      | Same phase      | No    |
+| FL-02   | Design checklist fail          | `Validator`(design)         | Design Manager         | 5              | Same phase      | No    |
+| FL-03   | Design reveals requirement gap | `Validator`(design)         | Requirements phase     | 1              | Full phase      | Yes   |
+| FL-04   | Static analysis fail           | `Validator`(implementation) | CodeGen Sub-agent      | 3              | Same task       | No    |
+| FL-05   | Integration fail               | Integration Validator       | Implementation Manager | 2              | Re-assign tasks | No    |
+| FL-06   | Spec compliance fail           | Spec QA Agent               | Implementation phase   | 3              | Full phase      | No    |
+| FL-07   | QA reveals design defect       | Spec QA Agent               | Design phase           | 1              | Full phase      | Yes   |
+| FL-08   | Critical security finding      | Security QA                 | Design phase           | 1              | Full phase      | Yes   |
+| FL-09   | Deployment health degraded     | Health Monitor              | CI/CD rollback         | Auto           | Automated       | No    |
+| FL-10   | MASC critical anomaly          | MASC Engine                 | Previous checkpoint    | 1              | Phase entry     | Yes   |
+| FL-11   | Intent contradiction detected  | Intent Tracker              | Requirements phase     | 1              | Phase entry     | Yes   |
+
+
+**Global guard:** `task.rollback_count ≥ (max_retries_per_node × active_phases)` → suspend task, preserve full state, notify human, block further autonomous execution.
+
+---
+
+
+
+# Part G — Repository Intelligence
+
+
+
+## G.1 Design Decision: Long-Lived Shared Service
+
+Repository Intelligence is **not** a per-task LangGraph subgraph. Its lifecycle (continuously updated, cross-task, federated across shards) doesn't fit task-scoped graph state. It is a long-lived service invoked via tool calls from any subgraph.
+
+## G.2 Layered Index Architecture
+
+
+| Layer  | Contents                                        | Update Pattern                                                     |
+| ------ | ----------------------------------------------- | ------------------------------------------------------------------ |
+| **L0** | Raw files + git metadata                        | Real-time via git hooks                                            |
+| **L1** | AST/symbol index (Tree-sitter)                  | Incremental, per changed file                                      |
+| **L2** | Dependency/call graph (NetworkX→Neo4j)          | Incremental, changed file + 1–2 hop dependents                     |
+| **L3** | Semantic embeddings (pgvector→Qdrant)           | Incremental, same trigger as L1/L2                                 |
+| **L4** | Architecture/knowledge graph + cached summaries | Invalidated by content-hash + dependency-hash; refreshed on demand |
+
+
+
+
+## G.3 Tool Stack & Rationale
+
+
+| Purpose                             | Recommended                                                              | Alternative                 | Why Chosen                                                                                                                                           |
+| ----------------------------------- | ------------------------------------------------------------------------ | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Symbol parsing / AST**            | **Tree-sitter**                                                          | Per-language LSP servers    | Multi-language; fast incremental parsing; embeddable; kept as L1 foundation                                                                          |
+| **Code search / lexical index**     | **Zoekt** (trigram-based)                                                | ripgrep over files          | Proven at Sourcegraph scale; O(1) query with pre-built index; not O(n) file scanning                                                                 |
+| **Dependency/call graph**           | **NetworkX** (MVP) → **Neo4j** (at scale)                                | KuzuDB                      | NetworkX: zero infra for MVP; Neo4j: multi-hop Cypher queries at scale. KuzuDB is embedded-only — wrong for a shared service with concurrent readers |
+| **Vector search**                   | **pgvector** (MVP) → **Qdrant** (at scale)                               | Pinecone                    | pgvector reuses Postgres infra at MVP; Qdrant is purpose-built ANN with horizontal scaling                                                           |
+| **Deep security semantic**          | **CodeQL** (periodic deep)                                               | Semgrep alone               | CodeQL's dataflow analysis catches classes of issues pattern-matching cannot. Use both at different tiers                                            |
+| **Repo context / token efficiency** | **Aider-style PageRank repo map**                                        | Full-repo LLM summarization | Proven technique: PageRank-weighted file/symbol map gives a model repo overview at ~1000 tokens vs. brute-force summarization                        |
+| **Hybrid retrieval fusion**         | **Reciprocal Rank Fusion (RRF)** over Zoekt + pgvector + graph expansion | Simple score averaging      | RRF is more robust to score distribution differences across retrieval methods                                                                        |
+
+
+**Note on SCIP (from V2):** SCIP is a *protocol* for writing language-server symbol data to a file — not a search engine. Tree-sitter handles parsing; Zoekt handles indexed search. SCIP-formatted exports can be used to populate the graph DB if precision demands compiler-grade resolution, but it is not a retrieval mechanism.
+
+## G.4 Federated Repository Intelligence for 100k–1M+ Files
+
+At 1M+ files, a single flat index makes query cost proportional to total repo size, not task relevance. One hot service's churn slows retrieval for every other team.
+
+**Design:** Partition L1–L4 into **domain shards** aligned to existing service or team-ownership boundaries (validated against the L2 dependency graph, not inferred from directory structure alone). Each shard: own AST index, vector sub-index, local dependency graph. A **global index-of-indices** stores only: shard boundaries, cross-shard dependency edges (API contracts, shared libraries), shard-level L4 summaries.
+
+**Query flow:**
+
+1. Request hits global index-of-indices → determines relevant shard(s).
+2. Drills into only those shards' full indices.
+3. Cross-shard queries ("what calls this API org-wide") route through the cross-shard edge index specifically.
+
+**Shard boundary validation:** boundaries are drawn from the L2 dependency graph, not from directory structure alone. A boundary is valid if the cross-boundary edge count is low relative to within-shard edge count. This prevents splitting a tightly-coupled component across shards.
+
+## G.5 Incremental Indexing & Freshness
+
+- Git-diff-triggered re-indexing scoped to changed files + 1–2 hop dependents.
+- **Nightly full re-index** as drift-safety net.
+- L4 summaries invalidated via content-hash + dependency-hash keys (staleness is detectable, not silent).
+- Target incremental update latency: < 10s for a typical commit (1–20 files).
+
+
+
+## G.6 RepositoryIntelligence API
+
+Single interface. Agents never query the graph DB or vector store directly.
+
+```python
+class RepositoryIntelligence:
+    # ── Structural (zero LLM cost) ──────────────────────────────────────
+    async def get_callers(self, symbol_id: str, depth: int = 1) -> list[Symbol]: ...
+    async def get_callees(self, symbol_id: str, depth: int = 1) -> list[Symbol]: ...
+    async def get_dependencies(self, file_path: str) -> list[str]: ...
+    async def get_dependents(self, file_path: str) -> list[str]: ...
+    async def get_impact_set(self, changed_files: list[str]) -> ImpactSet: ...
+    async def get_symbol_signature(self, symbol_id: str) -> str: ...
+    async def get_symbol_body(self, symbol_id: str) -> str: ...
+    async def get_file_structure(self, file_path: str) -> list[Symbol]: ...
+    
+    # ── Architecture (AST-generated, cached) ───────────────────────────
+    async def get_architecture_summary(self) -> str: ...     # ~1000–2000 tokens
+    async def get_aider_repo_map(self, scope: list[str]) -> str: ...  # PageRank-weighted
+    
+    # ── Semantic (vector search) ────────────────────────────────────────
+    async def search_concepts(self, query: str, top_k: int = 5) -> list[CodeChunk]: ...
+    async def find_similar_implementations(self, code: str, top_k: int = 3) -> list[CodeChunk]: ...
+    
+    # ── Hybrid (structural + semantic, fused via RRF) ───────────────────
+    async def find_relevant_context(self, task: str, scope: list[str],
+                                    max_tokens: int) -> ContextBundle: ...
+    
+    # ── Historical ─────────────────────────────────────────────────────
+    async def get_regression_history(self, modules: list[str]) -> list[RegressionRecord]: ...
+    async def get_design_decisions(self, modules: list[str]) -> list[ADR]: ...
+    async def get_change_frequency(self, file_path: str, days: int = 90) -> float: ...
+```
+
+
+
+## G.7 Architecture Summary (AST-Generated, Never LLM-Generated)
+
+```json
+{
+  "services": ["auth", "payments", "notifications"],
+  "service_map": {
+    "auth": {
+      "entry_points": ["POST /login", "POST /refresh"],
+      "key_symbols": ["UserService", "TokenManager"],
+      "dependencies": ["db.users", "cache.sessions"],
+      "tech_stack": ["FastAPI", "PostgreSQL", "Redis"]
+    }
+  },
+  "shared_modules": ["utils.logging", "utils.validation"],
+  "database_entities": ["User", "Session", "AuditLog"],
+  "api_boundaries": ["REST /api/v1", "gRPC auth.proto"],
+  "cross_shard_deps": [{"from": "payments", "to": "auth", "via": "auth.TokenManager"}]
+}
+```
+
+Generated by Tree-sitter AST walker. Update trigger: structural graph change in incremental index. This is the Level 0 context always injected into every agent.
+
+---
+
+
+
+# Part H — Context Engineering
+
+
+
+## H.1 Context Budget (Derived from Model Window)
+
+```python
+class ContextBudget:
+    MODEL_MAX = 128_000      # GLM-4.7 (update when provider changes)
+    THRESHOLD  = 0.80        # Never fill more than 80%
+    USABLE     = 102_400
+
+    # Non-negotiable reservations
+    SYSTEM_PROMPT     = 2_000
+    OUTPUT_RESERVE    = 4_000
+    CONVERSATION_HOT  = 8_000
+    ARCH_SUMMARY      = 2_000    # L0 context, always present
+
+    AVAILABLE = USABLE - SYSTEM_PROMPT - OUTPUT_RESERVE - CONVERSATION_HOT - ARCH_SUMMARY
+    # = 86,400 tokens for retrieved context
+
+    PHASE_BUDGETS = {
+        "requirements":    {"task_context": 4000, "precedents": 2000, "history": 1000},
+        "design":          {"repo_map": 5000, "structural_graph": 12000, "adrs": 3000, "patterns": 3000},
+        "implementation":  {"task_spec": 3000, "symbols": 8000, "interfaces": 2000},
+        "qa":              {"diff": 10000, "impact_set": 5000, "regression_history": 2000},
+        "deployment":      {"config": 3000, "deploy_history": 1000},
+    }
+```
+
+
+
+## H.2 Aider-Style PageRank Repo Map
+
+The Aider codebase established a highly effective technique: build a map of the repo's most important files and symbols by computing PageRank over the codebase's import/reference graph. Files referenced by many other files rank higher. This gives a model a dense, token-efficient overview of what matters most in the codebase.
+
+```
+At context assembly time:
+  1. Get PageRank scores for all files in affected shard
+  2. Build repo map: top-K files by PageRank, with their key symbols and signatures
+  3. Inject map into design and implementation agent contexts as Level 0.5 context
+     (after architecture summary, before progressive expansion)
+
+Token cost: ~1,000–3,000 tokens
+Value: model understands which files matter before retrieving any specific content
+```
+
+
+
+## H.3 Compression Pipeline (5 Steps, Cheapest First)
+
+```
+Input: Raw context candidates (potentially over budget)
+
+Step 1 — Structural filtering (free, deterministic)
+  Remove files not in dependency graph of changed modules
+  Remove symbols not referenced by changed code
+
+Step 2 — Deduplication (free)
+  Hash-based dedup of repeated code blocks
+  Merge overlapping code ranges
+
+Step 3 — AST-boundary skeletal compression (free)
+  Replace function bodies with signatures + docstrings (Level 1)
+  Expand to full body (Level 2) only on explicit agent tool call
+
+Step 4 — LRU eviction (free)
+  Evict oldest resolved context chunks
+  Preserve: active constraints, open ambiguities, recent tool results
+
+Step 5 — LLM summarization (fast model only, ~300–500 tokens)
+  Summarize cold conversation history into procedural memory block
+  Only if Steps 1–4 still over budget
+
+Fallback: If still over budget after Step 5 → split task into smaller sub-tasks
+```
+
+
+
+## H.4 Progressive Context Loading (Tool-Based)
+
+Agents start with minimal context and expand on demand via tool calls. This improves both cost efficiency and accuracy (avoids "lost in the middle" degradation on long contexts).
+
+```python
+# Tools available to every agent for on-demand context expansion
+CONTEXT_EXPANSION_TOOLS = [
+    "get_symbol_signature",     # Level 1: signature + docstring
+    "get_symbol_body",          # Level 2: full implementation
+    "get_callers",              # Call graph expansion (depth 1 or 2)
+    "get_callees",
+    "get_file_structure",       # File's class/function list (no bodies)
+    "search_codebase",          # Semantic search for patterns/concepts
+    "get_aider_repo_map",       # PageRank-weighted overview of a scope
+]
+```
+
+Agents receive only Level 0 (architecture summary) + Level 0.5 (repo map for scope) initially. All deeper context is agent-requested.
+
+---
+
+
+
+# Part I — Model Abstraction Layer
+
+
+
+## I.1 Adapter Interface
+
+```python
+from langchain_core.language_models import BaseChatModel  # Primary base
+
+class ModelAdapter(Protocol):
+    """All orchestration code talks to ModelAdapter — never to a provider SDK directly."""
+    def complete(self, request: ModelRequest) -> ModelResponse: ...
+    def stream(self, request: ModelRequest) -> Iterator[ModelChunk]: ...
+    def call_tools(self, request: ModelRequest, tools: list[ToolSpec]) -> ModelResponse: ...
+    def embed(self, texts: list[str]) -> list[Vector]: ...
+    @property
+    def pricing(self) -> ModelPricing: ...
+    @property
+    def capability_score(self) -> int: ...  # 1–10, used by ModelRouter
+```
+
+**Build choice:** use `LangChain BaseChatModel` as the base (already a LangGraph dependency; structured output, tool-calling, streaming, and retry semantics come essentially for free). LiteLLM as an optional normalization layer if GLM's endpoint has compatibility issues — not the primary abstraction.
+
+**GLM assumption to verify before implementation:** GLM Developer API is assumed OpenAI-compatible at the endpoint level. If true, the GLM adapter is a thin `ChatOpenAI`-compatible wrapper. Verify against live documentation.
+
+## I.2 Model Routing
+
+```python
+CAPABILITY_REQUIREMENTS = {
+    # (phase, operation): minimum_capability_score
+    ("requirements", "ambiguity_detection"):   8,
+    ("design", "architecture"):                9,
+    ("design", "security_analysis"):           8,
+    ("design", "self_critique"):               8,  # reflection pass
+    ("implementation", "code_generation"):     6,  # most tasks → fast model
+    ("implementation", "complex_refactor"):    8,
+    ("implementation", "feedback_synthesis"):  9,  # Feedback Agent
+    ("qa", "spec_validation"):                 7,
+    ("qa", "static_analysis"):                 1,  # tool-only, no LLM
+    ("any", "summarization"):                  3,
+    ("any", "intent_classification"):          4,  # Intent Tracker
+    ("masc", "semantic_drift"):                4,  # fast model sufficient
+}
+```
+
+Runtime `ModelRouter.select(phase, operation, context)` returns cheapest model meeting capability requirement, adjusted up for high-risk tasks. `escalate_model_tier()` (§F.3) upgrades on repeated rejection.
+
+## I.3 Circuit Breaker & Resilience
+
+If the primary provider (GLM) is unavailable or error-rate exceeds threshold mid-task: task **pauses** (checkpointed), not fails. Can resume once provider recovers or fallback adapter is configured. Architecturally supported from day one even though only one provider is implemented initially.
+
+## I.4 Adding a Provider (Verified Checklist)
+
+- [ ] New class implements `ModelAdapter`
+- [ ] Registered in pricing registry  
+- [ ] Zero changes to any file outside `model_adapters/`
+- [ ] Passes same contract test suite as GLM adapter
+- [ ] Golden-dataset regression run side-by-side with existing provider(s)
+
+
+
+## I.5 Cost & Token Tracking
+
+Callback handler logs usage per call. Versioned pricing registry (model → $/1M tokens in/out) normalizes cost across providers. Never rely on provider-reported cost fields alone — not consistently available across providers.
+
+---
+
+
+
+# Part J — MCP & External Integrations
+
+
+
+## J.1 Integration Recommendations
+
+*MCP server availability moves fast — re-verify maturity before committing implementation time.*
+
+
+| Service                               | Recommendation                                                                                            |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| **GitHub**                            | Official MCP server — use directly                                                                        |
+| **GitLab**                            | Evaluate community server maturity; fall back to adapter pattern if insufficient                          |
+| **Jira / Confluence**                 | Atlassian official remote MCP server — use directly                                                       |
+| **Slack**                             | Use directly — primary channel for HITL notifications                                                     |
+| **Linear**                            | MCP support available — use directly                                                                      |
+| **Azure DevOps**                      | Less mature — build thin custom adapter following MCP conventions                                         |
+| **CI/CD** (GitHub Actions, GitLab CI) | Via git provider MCP or direct webhook; fine here                                                         |
+| **Cloud providers**                   | Treat as **read-only observability only**; provisioning always behind human-approved IaC pipelines (§B.6) |
+| **Databases**                         | Read-only, task-scoped credentials only                                                                   |
+
+
+
+
+## J.2 Adapter Pattern for Missing MCP Servers
+
+Any external service without a mature MCP server gets a thin internal MCP-server wrapper around its REST API. This makes every external tool present the same interface shape to the orchestrator, regardless of underlying maturity.
+
+## J.3 Idempotency
+
+All MCP tool calls carry an idempotency key (stored in PostgreSQL). Duplicate triggers (from retries or resumed checkpoints) produce the same result, not duplicate side effects.
+
+---
+
+
+
+# Part K — Advanced Quality Assurance
+
+
+
+## K.1 QA Activation Matrix
+
+
+| QA Check                                          | Trigger Condition                           | Tool                                 | LLM Required?  |
+| ------------------------------------------------- | ------------------------------------------- | ------------------------------------ | -------------- |
+| Static Analysis (lint/type)                       | Always                                      | ruff, mypy                           | No             |
+| Secrets Scanning                                  | Always                                      | detect-secrets                       | No             |
+| Dependency Vulnerability                          | Always                                      | pip-audit / OSV-Scanner              | No             |
+| Unit + Integration Tests (impact-analysis scoped) | Always                                      | pytest + test-impact-analysis        | No             |
+| Spec QA (requirement coverage)                    | Always                                      | Structured comparison                | Yes (semantic) |
+| Security SAST (inline)                            | risk ≥ Medium                               | Semgrep                              | No             |
+| Security Deep (dataflow)                          | risk ≥ High, periodic                       | CodeQL                               | No             |
+| License / Supply-chain                            | risk ≥ Medium                               | OSV-Scanner / Trivy                  | No             |
+| API Contract Fuzzing                              | `has_api_contract_changes`                  | schemathesis                         | No             |
+| Mutation Testing                                  | risk ≥ High, **critical-path modules only** | mutmut (Python) / Stryker (JS)       | No             |
+| Property-Based Testing                            | risk ≥ Medium, pure functions               | Hypothesis / fast-check              | No             |
+| Exploratory Testing                               | risk ≥ High, UI changes                     | LLM-generated scenarios + Playwright | Yes            |
+| Performance QA                                    | risk ≥ High, perf-sensitive path            | k6 / Locust                          | No             |
+| Accessibility QA                                  | `has_ui_changes`                            | axe-core                             | No             |
+| DAST                                              | `production_criticality == critical`        | OWASP ZAP                            | No             |
+
+
+**Cost observation:** 13 of 15 QA checks use deterministic tools with zero LLM cost. LLM is required only for Spec QA and Exploratory Testing.
+
+## K.2 Test-Impact Analysis
+
+Default scope for every task: run only tests touching changed code + their downstream dependents (derived from L2 dependency graph). Full test suite only for Critical risk tier or explicitly triggered. Prevents the full-suite bottleneck at scale.
+
+## K.3 Bug Validation Protocol
+
+For work_type `bug` or `hotfix`:
+
+1. Bug Validation Agent reproduces the reported bug **before any fix agent runs**.
+2. If reproduction fails → task returned to requirements phase for re-scoping ("bug not reproducible as reported").
+3. Fix agent's output validated against: does it resolve the reproduction case?
+4. Regression test generated from reproduction steps, committed alongside fix.
+
+
+
+## K.4 Regression Test Generation
+
+After every passing QA:
+
+1. QA evidence bundle → fast model generates regression test cases targeting: each bug found, each edge case from exploratory testing.
+2. Tests formatted as pytest fixtures, committed to test suite alongside implementation PR.
+3. Test metadata stored: `{test_id, covers_requirement_id, covers_module, generated_by_task_id}`.
+4. Failure pattern stored in episodic memory: `{module, failure_type, fix_pattern}`.
+
+
+
+## K.5 Evidence Bundle Standard
+
+Every task completion produces a structured evidence bundle attached to the PR and stored in the blackboard:
+
+- Coverage delta (before/after)
+- Static analysis results (severity counts)
+- Security findings (severity breakdown)
+- Mutation score (if run)
+- Test results (pass/fail/skip)
+- Spec compliance report
+- Bug reproduction result (for bug/hotfix)
+- Risk score at QA entry
+
+---
+
+
+
+# Part L — Evaluation Framework
+
+
+
+## L.1 Automated Scoring Pipeline
+
+Every task completion triggers evaluation automatically.
+
+```
+Task completes
+  → EvaluationPipeline.score(task_id) [runs async, within 60s]
+  → Parallel:
+      ├── fix_rate = correct_files / required_files
+      ├── token_efficiency = fix_rate / (total_tokens / 1000)
+      ├── cost_usd = Σ(input_tokens × price_in + output_tokens × price_out)
+      ├── hitl_count = len(hitl_history)
+      ├── rollback_count from SDLCState
+      ├── cycle_time = completed_at - created_at
+      └── attribution_accuracy (maps failures to root-cause agent)
+  → KPIStore.record(task_id, scores)
+  → Dashboard.update()
+```
+
+
+
+## L.2 KPI Reference
+
+
+
+### Task-Level
+
+
+| KPI                  | Formula                                           | Target                |
+| -------------------- | ------------------------------------------------- | --------------------- |
+| **Fix Rate**         | `correct_files / required_files` (partial credit) | > 0.85 for routine    |
+| **Token Efficiency** | `fix_rate / (total_tokens / 1000)`                | Improving trend       |
+| **Cost per Task**    | `Σ(token × price)` per provider                   | < budget threshold    |
+| **HITL Rate**        | `hitl_count / task_count`                         | < 2 for routine       |
+| **Rollback Rate**    | `rollback_count / task_count`                     | < 10%                 |
+| **Cycle Time**       | `completed_at - created_at`                       | Defined per work_type |
+
+
+
+
+### Phase-Level
+
+
+| Phase          | Primary KPI                         | Target                 |
+| -------------- | ----------------------------------- | ---------------------- |
+| Requirements   | Clarification turns before exit     | < 5 for feature        |
+| Requirements   | Ambiguity rate                      | < 10% open ambiguities |
+| Design         | Coverage: requirements covered      | 100%                   |
+| Design         | Rework rate                         | < 20%                  |
+| Implementation | First-pass static check rate        | > 70%                  |
+| Implementation | Context efficiency (used/retrieved) | > 70%                  |
+| QA             | Defect detection rate               | > 90%                  |
+| QA             | False positive rate                 | < 5%                   |
+| QA             | Mutation score                      | > 80% (high-risk)      |
+| Deployment     | Success rate                        | > 99%                  |
+| Deployment     | MTTR                                | < 15 min               |
+
+
+
+
+### Agent-Level
+
+
+| KPI                  | Formula                                               | Target |
+| -------------------- | ----------------------------------------------------- | ------ |
+| Attribution Accuracy | `correctly_attributed_failures / total_failures`      | > 85%  |
+| Recovery Rate        | `auto_recovered_errors / total_errors`                | > 75%  |
+| Tool Call Accuracy   | `correct_tool_calls_first_attempt / total_tool_calls` | > 90%  |
+| Hallucination Rate   | `fabricated_facts / total_factual_claims`             | < 5%   |
+
+
+
+
+### Feedback Loop Health
+
+
+| KPI                  | Metric                                               | Why                                              |
+| -------------------- | ---------------------------------------------------- | ------------------------------------------------ |
+| Loop trigger rate    | % tasks triggering each named loop                   | High rate on one loop → upstream quality problem |
+| Loop resolution rate | % resolving within budget vs. escalating             | Falling rate → platform regression signal        |
+| Oscillation rate     | % tasks where same loop fires 2+ times on same issue | FeedbackReport not giving sufficient guidance    |
+
+
+
+
+## L.3 Golden Dataset & Shadow-Mode Graduation
+
+Never trust confidence scores alone to grant autonomy at a risk tier. Shadow-mode graduation: agent proposes → human decides → outcomes compared. A risk tier becomes (semi-)autonomous only after a measured resolution-rate / false-positive threshold is met empirically against the golden dataset.
+
+## L.4 Platform Self-Evaluation
+
+The platform maintains its own regression suite — fixed historical tasks with known outcomes, re-run whenever underlying models, prompts, or agent logic change. Detects *platform regression* separately from a task simply being hard. Distinct from §K (which evaluates the software built — this evaluates the platform itself).
+
+## L.5 DORA Metrics as Business-Facing KPIs
+
+Deployment frequency, lead time for changes, change failure rate, MTTR — bridge from internal agent metrics to how engineering organizations already report on delivery.
+
+---
+
+
+
+# Part M — Prompt Engineering Strategy
+
+Neither prior blueprint specified a prompt engineering strategy beyond "structured outputs." This is a concrete approach for all agents.
+
+## M.1 Output Schema Protocol
+
+Every agent output is a Pydantic schema defined in `agents/prompts/schemas/<agent_id>.py`. MASC Check 1 validates against this schema. Agents are instructed to produce JSON matching the schema — never free-form text for structured outputs.
+
+## M.2 System Prompt Template Structure
+
+```
+[ROLE]
+You are the [Agent Name]. Your sole responsibility is [narrow scope].
+You do NOT [out-of-scope actions].
+
+[CONTEXT INJECTION ORDER]
+1. Architecture summary (always injected)
+2. Aider repo map for task scope (injected by context builder)
+3. Phase Handoff Packet from previous phase
+4. Task-specific retrieved context (tool-expanded as needed)
+
+[CONSTRAINTS]
+- All outputs must conform to the schema in [schema_ref]
+- If confidence in your output is below [threshold], set confidence field accordingly
+- Do not proceed if required context is missing — use the get_symbol_signature tool first
+
+[OUTPUT FORMAT]
+<JSON schema>
+```
+
+
+
+## M.3 Reflection Pass (High-Stakes Agents Only)
+
+For Design Manager and Security Architect — after producing initial output, a second LLM call with:
+
+```
+"Review your architecture document above. Identify:
+1. Any requirement from the spec that is not addressed
+2. Any internal contradiction in the design
+3. Any assumption that should be explicit
+
+Report findings as a list. If none, state 'No gaps found.'"
+```
+
+The reflection output is appended to the draft before it enters `Validator`(design). This improves first-pass validator acceptance rate without requiring a separate agent invocation.
+
+---
+
+
+
+# Part N — Production Readiness
+
+
+| Category        | Risk                                                        | Mitigation                                                                                                                                               |
+| --------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Reliability** | Internal scoring/policy failure defaults toward autonomy    | Fail-Closed (Principle 8) — every failure routes toward more oversight                                                                                   |
+| **Reliability** | LangGraph checkpointer (PostgreSQL) failure mid-task        | Postgres primary+replica HA; task resumes from last durable checkpoint on failover                                                                       |
+| **Reliability** | HITL timeout (human absent)                                 | Configurable timeout → suspend task (never auto-approve); escalation chain                                                                               |
+| **Reliability** | Infinite feedback loop                                      | Global `rollback_count` cap; task suspension on breach                                                                                                   |
+| **Scalability** | Global knowledge graph bottleneck at 1M+ files              | Federated sharded indexing + global index-of-indices (§G.4)                                                                                              |
+| **Scalability** | Sequential design review blocking large migrations          | Parallel sub-design tracks for independent services; single `Validator`(design) at fan-in                                                                |
+| **Scalability** | Worker fleet exhaustion under burst load                    | Queue-based backpressure; consumer-group partitioning by risk tier (Critical-risk tasks never starved by Low-risk flood)                                 |
+| **SPOF**        | Single model provider (GLM)                                 | Circuit-breaker + checkpoint-and-pause (§I.3)                                                                                                            |
+| **SPOF**        | One Postgres instance for checkpointing AND pgvector at MVP | Acceptable early; flagged to split once at-scale repo intelligence lands (different access patterns: read-heavy retrieval vs. write-heavy checkpointing) |
+| **SPOF**        | Redis failure (task queue)                                  | Redis Sentinel or Cluster mode                                                                                                                           |
+| **Concurrency** | Parallel tasks reading shared RI stores                     | Read/write separation: write → primary, read → replicas                                                                                                  |
+| **Concurrency** | Parallel fan-out agents editing overlapping files           | Fan-in conflict-detection node (§D.4)                                                                                                                    |
+| **Cost**        | Re-indexing cost at 1M+ files                               | Incremental indexing bounded to changed-file scope; tracked as own cost line                                                                             |
+| **Cost**        | Runaway agent retry/decomposition loops                     | Kill-switch (§B.7)                                                                                                                                       |
+| **Security**    | Prompt injection via ingested repo/issue/PR content         | Untrusted-content classifier before content enters semantic memory (§B.6)                                                                                |
+| **Security**    | Tool supply-chain: compromised linter or MCP server         | Version pinning; least-privilege tool credentials; periodic supply-chain audit (§B.6)                                                                    |
+| **Security**    | Sandbox escape during code execution                        | Network-restricted, ephemeral, task-scoped containers, torn down regardless of outcome                                                                   |
+| **Operational** | Cannot debug failed run months later                        | Explicit retention: full traces 90 days; episodic outcomes indefinite                                                                                    |
+| **Operational** | Policy changes deployed without review                      | Policy configs (§O directory) go through same PR review process as code                                                                                  |
+
+
+---
+
+
+
+# Part O — Technology Stack
+
+
+| Category                 | Recommendation                      | Version       | Reason                                                |
+| ------------------------ | ----------------------------------- | ------------- | ----------------------------------------------------- |
+| **Language**             | Python                              | 3.12          | Modern async, type system, ecosystem                  |
+| **Orchestration**        | LangGraph + LangChain core          | 0.3+          | Mandated; native HITL, checkpointing, streaming       |
+| **Durable state**        | LangGraph Postgres checkpointer     | —             | Per §D                                                |
+| **API framework**        | FastAPI                             | 0.111+        | Async-native; matches LangGraph's execution model     |
+| **Job queue**            | Redis Streams (primary) or RabbitMQ | —             | Consumer-group partitioning for risk-tier isolation   |
+| **Worker framework**     | ARQ (if Redis)                      | 0.25+         | Async; mature backpressure and retry semantics        |
+| **Primary database**     | PostgreSQL                          | 16            | Checkpointing, Task records, audit log, approvals     |
+| **Vector search**        | pgvector → Qdrant                   | 0.7+ → latest | pgvector at MVP (reuses Postgres); Qdrant at scale    |
+| **Graph database**       | NetworkX → Neo4j                    | — → 5.x       | NetworkX: MVP, zero infra; Neo4j: multi-hop Cypher    |
+| **Code search**          | Zoekt (trigram)                     | latest        | Battle-proven at Sourcegraph scale                    |
+| **AST parsing**          | Tree-sitter                         | 0.23+         | Multi-language; fast incremental                      |
+| **Deep security**        | CodeQL                              | latest        | Dataflow analysis; periodic deep scans                |
+| **Inline security**      | Semgrep                             | 1.70+         | Fast pattern-based; runs inline during QA             |
+| **Dependency audit**     | pip-audit + OSV-Scanner / Trivy     | latest        | CVE + license scanning                                |
+| **Mutation testing**     | mutmut (Python) / Stryker (JS)      | 2.5+          | High-risk, critical-path modules only                 |
+| **Property testing**     | Hypothesis                          | 6.100+        | Pure functions and parsers                            |
+| **API fuzzing**          | schemathesis                        | 3.27+         | OpenAPI-based contract testing                        |
+| **Load testing**         | k6 / Locust                         | latest        | Performance QA for High+ risk                         |
+| **UI testing**           | Playwright                          | 1.44+         | Browser automation for UI QA                          |
+| **Accessibility**        | axe-core                            | latest        | WCAG 2.1 compliance                                   |
+| **Caching**              | Redis                               | 7.2+          | Hot RI query results; UI session state                |
+| **HTTP client**          | httpx                               | 0.27+         | Async; HTTP/2                                         |
+| **Model adapters**       | LangChain BaseChatModel             | 0.3+          | Structured output, tools, streaming for free          |
+| **LiteLLM**              | Optional normalization layer        | latest        | If GLM endpoint has OpenAI compatibility gaps         |
+| **Tracing**              | OpenTelemetry SDK                   | 1.25+         | Per-node spans; cost tracking                         |
+| **Agent observability**  | Langfuse (self-hosted)              | 2.x           | Agent trace visualization; token cost per agent       |
+| **Metrics**              | Prometheus                          | 2.52+         | System and agent metrics                              |
+| **Dashboards**           | Grafana                             | 10.x          | KPI dashboards; alerting                              |
+| **Logging**              | structlog                           | 24.x          | Structured JSON; same OTel pipeline                   |
+| **Secrets scanning**     | detect-secrets                      | 1.5+          | Pre-commit + CI                                       |
+| **Linting / formatting** | ruff                                | 0.4+          | Replaces flake8 + black + isort                       |
+| **Type checking**        | mypy                                | 1.10+         | Static type validation                                |
+| **Testing**              | pytest + pytest-asyncio             | 8.2+          | Async test support                                    |
+| **Package management**   | uv                                  | 0.2+          | Faster than pip/poetry                                |
+| **MCP client**           | mcp Python SDK                      | 1.x           | Official client                                       |
+| **Auth (human UI)**      | OAuth2/OIDC (org identity provider) | —             | Human-facing auth; separate from agent service tokens |
+| **IaC / deployment**     | Terraform (or org standard)         | —             | All provisioning; never direct agent-to-cloud         |
+
+
+---
+
+
+
+# Part P — UI Specification
+
+12 screens. Each is a thin read layer over objects already defined in this document. No new backend data model.
+
+
+| Screen                         | Shows                                                                                                                                      | Data Source                                    |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
+| **1. New Task**                | Intake form (free text + optional structured fields)                                                                                       | — (write path only)                            |
+| **2. Requirement Interview**   | Current question from Questioning Engine (§E.4), **plus questions auto-answered from repo with their retrieved answers shown**             | RequirementsSpec, RI responses                 |
+| **3. Workflow Overview**       | WorkflowProfile in plain language — risk tier, methodology, active agents, and *which §F.3 rule fired*                                     | Task, WorkflowProfile                          |
+| **4. SDLC Phase View**         | Current position in the state machine (§D.3); backward edges shown as visually distinct loops                                              | SDLCState.state                                |
+| **5. Active Agents**           | Which agents are running now and their current tool call                                                                                   | OTel trace stream                              |
+| **6. Live Execution Timeline** | Phase transitions, feedback loops triggered, approvals — chronological                                                                     | agent_events channel                           |
+| **7. Questions Queue**         | Open questions across a human's in-flight tasks, with already-gathered context shown                                                       | hitl_queue where type=clarification            |
+| **8. Human Approval Requests** | Evidence bundle (diff, QA summary, confidence breakdown, precedent tasks), decision buttons, timeout countdown                             | ApprovalGate evidence_bundle_spec, HITLRequest |
+| **9. Agent Logs**              | Raw OTel trace detail per agent                                                                                                            | Trace backend                                  |
+| **10. QA Summary**             | Which QA checks ran (§K.1 matrix), results, bug reproduction result first for bug/hotfix                                                   | QAEvidence                                     |
+| **11. Deployment Status**      | Strategy, pipeline URL, canary traffic split + health comparison chart, auto-promote/rollback thresholds                                   | DeploymentRecord, health metrics               |
+| **12. Final Report**           | Definition-of-Done checklist per work type (§A's B.11 equivalent), cost breakdown, HITL history, files changed, ADRs generated, KPI scores | Full task record                               |
+
+
+
+
+### WebSocket Event Protocol
+
+```python
+class AgentEvent(TypedDict):
+    event_id: str
+    task_id: str
+    timestamp: str
+    agent_id: str
+    phase: str
+    event_type: Literal[
+        "agent_started", "agent_tool_call", "agent_tool_result",
+        "agent_token_stream", "agent_completed", "agent_failed",
+        "masc_flag", "hitl_required", "hitl_responded",
+        "phase_completed", "task_completed",
+        "rollback_initiated", "feedback_loop_triggered"
+    ]
+    payload: dict
+```
+
+---
+
+
+
+# Part Q — Project Structure
+
+```
+sdlc-platform/
+├── apps/
+│   ├── api/                      # FastAPI service (REST + WebSocket)
+│   └── worker/                   # LangGraph execution workers (ARQ)
+│
+├── packages/
+│   ├── common/                   # Shared: Task model, config, security utils
+│   │
+│   ├── orchestration/            # LangGraph graphs, nodes, state schemas
+│   │   ├── state.py              # SDLCState TypedDict + all reducers
+│   │   ├── dag_constructor.py    # WorkflowContext → graph topology
+│   │   ├── feedback.py           # FeedbackReport schema + loop registry
+│   │   ├── masc.py               # MASCEngine (3-check pipeline)
+│   │   ├── intent_tracker.py     # IntentTracker
+│   │   ├── checkpointers/
+│   │   │   └── postgres.py       # AsyncPostgresSaver + thread_id[:255]
+│   │   └── workflows/
+│   │       ├── agile.py
+│   │       ├── waterfall.py
+│   │       ├── hybrid.py
+│   │       └── emergency.py      # Hotfix fast path
+│   │
+│   ├── agents/
+│   │   ├── base.py               # BaseAgent (retry, MASC integration, OTel)
+│   │   ├── templates/
+│   │   │   ├── approval_gate.py  # ApprovalGate template
+│   │   │   └── validator.py      # Validator template
+│   │   ├── intake/
+│   │   │   └── planning_manager.py
+│   │   ├── requirements/
+│   │   │   ├── requirements_analyst.py
+│   │   │   └── confidence_scorer.py
+│   │   ├── design/
+│   │   │   ├── design_manager.py
+│   │   │   ├── repo_architecture_analyst.py
+│   │   │   └── security_architect.py
+│   │   ├── implementation/
+│   │   │   ├── implementation_manager.py
+│   │   │   ├── codegen_agent.py       # Instanced via Send API
+│   │   │   └── feedback_agent.py
+│   │   ├── qa/
+│   │   │   ├── qa_manager.py
+│   │   │   ├── bug_validation_agent.py
+│   │   │   ├── dependency_impact_agent.py
+│   │   │   ├── spec_qa_agent.py
+│   │   │   └── suite_runner.py        # QA tool orchestrator
+│   │   ├── release/
+│   │   │   ├── review_manager.py
+│   │   │   ├── release_manager.py
+│   │   │   ├── rollback_agent.py
+│   │   │   └── monitoring_manager.py
+│   │   └── prompts/
+│   │       ├── system/               # System prompt templates per agent
+│   │       └── schemas/              # Pydantic output schemas per agent
+│   │
+│   ├── requirements_engine/      # Dynamic Questioning Engine (§E.4)
+│   │   ├── engine.py
+│   │   └── models.py             # Question, IntentDiff schemas
+│   │
+│   ├── repo_intel/               # Repository Intelligence service (§G)
+│   │   ├── api.py                # RepositoryIntelligence public interface
+│   │   ├── indexers/
+│   │   │   ├── coordinator.py    # Sharded parallel indexer
+│   │   │   ├── treesitter.py
+│   │   │   ├── zoekt_client.py
+│   │   │   └── incremental.py    # Git hook integration
+│   │   ├── graph/
+│   │   │   ├── networkx_client.py  # MVP graph
+│   │   │   ├── neo4j_client.py     # Scale graph
+│   │   │   └── bfs.py
+│   │   ├── vector/
+│   │   │   ├── pgvector_client.py
+│   │   │   ├── qdrant_client.py
+│   │   │   └── hybrid_retrieval.py # RRF fusion
+│   │   └── summaries/
+│   │       ├── architecture_summary.py  # AST-generated, never LLM
+│   │       └── repo_map.py              # Aider-style PageRank map
+│   │
+│   ├── context_engine/           # Context engineering (§H)
+│   │   ├── budget.py             # ContextBudget per phase
+│   │   ├── builder.py            # Progressive context loading
+│   │   ├── compressor.py         # 5-step compression pipeline
+│   │   └── handoff_packet.py     # PhaseHandoffPacket
+│   │
+│   ├── model_adapters/           # Model abstraction layer (§I)
+│   │   ├── base.py               # ModelAdapter Protocol
+│   │   ├── router.py             # ModelRouter + escalate_model_tier
+│   │   ├── registry.py
+│   │   ├── glm/
+│   │   │   └── adapter.py        # GLM-4.7 + GLM-4.7-Flash
+│   │   └── telemetry.py          # UsageTelemetry + OTel spans
+│   │
+│   ├── workflow_engine/          # Routing rules (§F)
+│   │   ├── policy.py             # resolve_workflow_profile()
+│   │   └── context.py            # WorkflowContext schema
+│   │
+│   ├── mcp_integrations/         # MCP clients + adapters (§J)
+│   │   ├── base.py
+│   │   ├── idempotency.py
+│   │   ├── clients/
+│   │   │   ├── github.py
+│   │   │   ├── jira.py
+│   │   │   └── slack.py
+│   │   └── adapters/             # Custom adapters for missing MCP servers
+│   │
+│   ├── qa/                       # QA tool wrappers (§K)
+│   │   ├── static_analysis.py
+│   │   ├── security_qa.py
+│   │   ├── mutation_runner.py
+│   │   ├── property_tester.py
+│   │   └── evidence_collector.py
+│   │
+│   ├── evaluation/               # Evaluation framework (§L)
+│   │   ├── pipeline.py           # EvaluationPipeline (post-task)
+│   │   ├── fix_rate.py
+│   │   ├── attribution.py
+│   │   ├── feedback_loop_health.py
+│   │   └── benchmarks/
+│   │       ├── golden_dataset.py
+│   │       └── shadow_mode.py
+│   │
+│   └── memory/                   # 4-tier memory stores (§B.3)
+│       ├── working/              # LangGraph state (managed by orchestration/)
+│       ├── episodic/             # Postgres + pgvector
+│       ├── semantic/             # RI service (managed by repo_intel/)
+│       └── procedural/           # Configs (managed by configs/)
+│
+├── ui/                           # React + TypeScript SPA (§P)
+│   └── src/
+│       ├── screens/              # 12 screens
+│       ├── components/
+│       ├── hooks/                # useWebSocket, useTask, useHITL
+│       └── api/                  # Typed API client
+│
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   ├── contract/                 # Adapter interface contract tests
+│   ├── benchmark/                # Golden dataset, retrieval precision, seeded defects
+│   └── chaos/                    # Induced-failure verification (§N)
+│
+├── configs/                      # Versioned, PR-reviewed (§N)
+│   ├── workflow_policies/        # §F rule sets
+│   ├── pricing/                  # §I pricing registry
+│   └── question_bank/            # §E.4 question bank
+│
+├── db/
+│   ├── migrations/               # Alembic
+│   └── schema.sql                # Initial schema
+│
+├── scripts/
+│   ├── init_db.py
+│   ├── index_repo.py
+│   └── post_commit_hook.sh
+│
+├── docker-compose.yml            # PostgreSQL + Redis + Langfuse (dev)
+├── docker-compose.prod.yml
+├── pyproject.toml                # uv dependencies
+├── Makefile
+└── .env.example
+```
+
+---
+
+
+
+# Part R — Database Schema (Core Tables)
+
+```sql
+-- LangGraph-managed: checkpoints, checkpoint_blobs, checkpoint_writes
+
+-- Platform-managed:
+
+CREATE TABLE tasks (
+    id              VARCHAR(255) PRIMARY KEY,  -- ≤ 255 chars, enforced at Task model
+    title           TEXT NOT NULL,
+    source          VARCHAR(50) NOT NULL,
+    type            VARCHAR(50) NOT NULL,
+    methodology     VARCHAR(50) NOT NULL,
+    risk_tier       VARCHAR(20) NOT NULL,
+    confidence_score FLOAT,
+    state           VARCHAR(50) DEFAULT 'intake',
+    workflow_profile_id VARCHAR(255),
+    token_ceiling   INTEGER DEFAULT 2000000,
+    cost_ceiling_usd FLOAT DEFAULT 20.0,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    completed_at    TIMESTAMPTZ,
+    created_by      VARCHAR(255)
+);
+
+CREATE TABLE approvals (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id         VARCHAR(255) REFERENCES tasks(id),
+    checkpoint      VARCHAR(100) NOT NULL,
+    approver        VARCHAR(255),
+    decision        VARCHAR(50),
+    evidence_ref    TEXT,         -- Blackboard pointer
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    decided_at      TIMESTAMPTZ
+);
+
+CREATE TABLE hitl_log (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id         VARCHAR(255) REFERENCES tasks(id),
+    phase           VARCHAR(100),
+    reason          TEXT,
+    evidence_ref    TEXT,
+    options         JSONB,
+    response        TEXT,
+    responded_by    VARCHAR(255),
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    responded_at    TIMESTAMPTZ,
+    timeout_at      TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE cost_tracking (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id         VARCHAR(255) REFERENCES tasks(id),
+    agent_id        VARCHAR(255),
+    phase           VARCHAR(100),
+    model_id        VARCHAR(100),
+    input_tokens    INTEGER,
+    output_tokens   INTEGER,
+    cost_usd        NUMERIC(10,6),
+    latency_ms      INTEGER,
+    recorded_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE evaluation_results (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id         VARCHAR(255) REFERENCES tasks(id),
+    fix_rate        FLOAT,
+    token_efficiency FLOAT,
+    hitl_count      INTEGER,
+    rollback_count  INTEGER,
+    cycle_time_s    INTEGER,
+    cost_usd        NUMERIC(10,6),
+    attribution_accuracy FLOAT,
+    recorded_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE regression_history (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    module_path     VARCHAR(500),
+    failure_type    VARCHAR(100),
+    fix_pattern     TEXT,
+    task_id         VARCHAR(255) REFERENCES tasks(id),
+    recorded_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE design_decisions (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    adr_id          VARCHAR(100) UNIQUE,
+    module_paths    JSONB,
+    decision        TEXT,
+    rationale       TEXT,
+    task_id         VARCHAR(255) REFERENCES tasks(id),
+    recorded_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE users (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username        VARCHAR(255) UNIQUE NOT NULL,
+    role            VARCHAR(50) NOT NULL DEFAULT 'developer',
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE feedback_loop_events (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id         VARCHAR(255) REFERENCES tasks(id),
+    loop_id         VARCHAR(100),          -- e.g., "FL-04"
+    source_agent    VARCHAR(255),
+    target_agent    VARCHAR(255),
+    attempt_number  INTEGER,
+    resolved        BOOLEAN,
+    recorded_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX idx_tasks_state        ON tasks(state);
+CREATE INDEX idx_tasks_risk_tier    ON tasks(risk_tier);
+CREATE INDEX idx_cost_task_id       ON cost_tracking(task_id);
+CREATE INDEX idx_regression_module  ON regression_history(module_path);
+CREATE INDEX idx_design_modules     ON design_decisions USING GIN(module_paths);
+CREATE INDEX idx_feedback_task      ON feedback_loop_events(task_id, loop_id);
+```
+
+---
+
+
+
+# Part S — RBAC Model
+
+
+| Role        | Description                                                                     |
+| ----------- | ------------------------------------------------------------------------------- |
+| `developer` | Can submit tasks, view execution, respond to clarification questions            |
+| `reviewer`  | developer + can approve design and implementation HITL gates                    |
+| `deployer`  | reviewer + can approve deployment HITL gates and trigger rollbacks              |
+| `admin`     | Full access: modify RBAC, view cost data, suspend tasks, modify risk thresholds |
+
+
+
+| Action                          | developer | reviewer | deployer | admin |
+| ------------------------------- | --------- | -------- | -------- | ----- |
+| Submit task                     | ✓         | ✓        | ✓        | ✓     |
+| View execution / logs           | ✓         | ✓        | ✓        | ✓     |
+| Respond to clarification        | ✓         | ✓        | ✓        | ✓     |
+| Approve scope / design HITL     | ✗         | ✓        | ✓        | ✓     |
+| Approve release HITL            | ✗         | ✓        | ✓        | ✓     |
+| Approve deployment (staging)    | ✗         | ✓        | ✓        | ✓     |
+| Approve deployment (production) | ✗         | ✗        | ✓        | ✓     |
+| Trigger rollback                | ✗         | ✗        | ✓        | ✓     |
+| View cost data                  | ✗         | ✗        | ✗        | ✓     |
+| Suspend tasks                   | ✗         | ✗        | ✗        | ✓     |
+| Modify risk thresholds          | ✗         | ✗        | ✗        | ✓     |
+
+
+---
+
+
+
+# Part T — Priority Summary
+
+
+
+## P0 — Must Ship (MVP)
+
+- Task data model + PostgreSQL schema (Phase 0)
+- `SDLCState` TypedDict + all reducers (Phase 0)
+- Cost kill-switch + execution sandbox (Phase 0)
+- `AsyncPostgresSaver` + `thread_id[:255]` enforcement (Phase 1)
+- `ModelAdapter` ABC + GLM adapter + pricing registry (Phase 2)
+- Tree-sitter symbol index + Zoekt search + pgvector + incremental indexing (Phase 3)
+- Dynamic Requirements Questioning Engine (Phase 4)
+- Planning Manager + Requirements Analyst + Confidence Scorer + `Validator`(requirements) (Phase 5)
+- `interrupt()` HITL gates + `ApprovalGate` template (Phase 8)
+- MASC engine (3-check pipeline) (runs from Phase 5 onward)
+- OTel instrumentation (Phase 0)
+- FastAPI + WebSocket event streaming (Phase 8)
+- UI Screens 1–4, 7–8 (Phase 9)
+
+
+
+## P1 — Q1 Post-MVP
+
+- Design phase: Design Manager + Repo Architecture Analyst + Security Architect + `Validator`(design) (Phase 6)
+- Implementation phase: Manager + CodeGen sub-agents + Feedback Agent + Integration Validator (Phase 6)
+- QA phase: full pipeline with risk routing + Bug Validation Agent (Phase 7)
+- Release phase: Review Manager + Release Manager + Rollback sub-agent + Monitoring Manager (Phase 8)
+- Workflow Policy Engine: `resolve_workflow_profile()` + `escalate_model_tier()` (Phase 10)
+- NetworkX → Neo4j graph migration (Phase 11)
+- Phase Handoff Packets + context compression pipeline (Phase 12)
+- Semgrep (inline QA) + mutmut + Hypothesis (Phase 13)
+- GitHub MCP + Jira MCP + Slack MCP (Phase 14)
+- Evaluation pipeline + Fix Rate + Feedback Loop Health KPIs (Phase 15)
+- RBAC enforcement + audit log
+- UI Screens 5–6, 9–11 (Phase 9)
+
+
+
+## P2 — Q2
+
+- Aider-style PageRank repo map (Phase 12)
+- CodeQL periodic deep scans (Phase 13)
+- Performance QA (k6/Locust) + Accessibility QA (axe-core) + API contract fuzzing (schemathesis) (Phase 13)
+- GitLab MCP + custom adapter base (Phase 14)
+- Golden dataset + shadow-mode graduation harness (Phase 15)
+- Platform self-evaluation regression suite (Phase 15)
+- pgvector → Qdrant migration (Phase 16)
+- UI Screen 12 (Phase 9)
+- Production hardening + chaos tests (Phase 16)
+
+
+
+## P3 — Future
+
+- Multi-provider model routing (Anthropic, OpenAI, DeepSeek)
+- Multi-repo federated RI across organizations
+- Fine-tuned Intent Classifier and CodeGen sub-agents (where justified by §E.3)
+- Kubernetes horizontal scaling for worker pool
+- Autonomous technical debt scheduling
+- Self-improving evaluation (evaluation model trained on human-shadow-mode comparisons)
+- Temporal as durability backbone for very long-running tasks (multi-day spans)
+
+---
+
+*Implementation starts at §B.1 (Task Data Model), §B.4 (Confidence Model), §A.2 Principle 8 (Fail-Closed), and §E.1 (Agent Templates). Everything from §F onward assumes those four exist and are correctly wired. Three things to verify against live documentation before implementation: GLM's OpenAI-compatibility (§I.1), current MCP server maturity for Azure DevOps and GitLab (§J.1), and whether your repositories have clean existing shard boundaries or will need manual definition (§G.4).*
