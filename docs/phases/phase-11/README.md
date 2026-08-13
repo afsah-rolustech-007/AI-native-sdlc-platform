@@ -38,6 +38,8 @@ Query flow:
 Same RepositoryIntelligence interface (§G.6) as Phase 3 — no agent code changes.
 ```
 
+
+
 ## Expected Live Demo
 
 Using a larger corpus (a real large open-source monorepo, or a synthetically assembled large corpus if a suitable real one isn't available) partitioned into at least 3 domain shards validated against real dependency-graph boundaries (not directory structure alone), demonstrate: a query resolving to exactly the right shard(s); a cross-shard query correctly using the cross-shard edge index; retrieval precision@5 measured against the Phase 03 methodology, within 5 points of the Phase 03 baseline; and a timed nightly full re-index run at this larger scale.
@@ -50,6 +52,8 @@ Using a larger corpus (a real large open-source monorepo, or a synthetically ass
 - Federated query routing inside `RepositoryIntelligence` (interface unchanged, implementation extended).
 - Scale benchmark comparing against the Phase 03 baseline.
 
+
+
 ## Sections
 
 1. [Domain Shard Partitioning & Boundary Validation](section-01.md)
@@ -57,3 +61,4 @@ Using a larger corpus (a real large open-source monorepo, or a synthetically ass
 3. [NetworkX → Neo4j Migration](section-03.md)
 4. [Nightly Full Re-Index at Scale](section-04.md)
 5. [Scale Benchmarking Against the Phase 3 Baseline](section-05.md)
+

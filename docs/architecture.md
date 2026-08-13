@@ -140,7 +140,8 @@ User/Ticket ──▶ Intake Subgraph ──▶ Requirements Subgraph ──▶ 
                                                                     ▼
                                                           Implementation Subgraph
                                                           (parallel CodeGen via Send API,
-                                                           fan-in conflict check)
+                                                           Fan-in Coordinator: deterministic
+                                                           overlap + WCP conflict check)
                                                                     │
                                                                     ▼
                                                               QA Subgraph
@@ -187,6 +188,16 @@ Full detail in §E of the blueprint; summarized here for orientation.
 - **MASC (§E.6)** is post-node middleware, not an agent — it runs after every agent node, cheapest-check-first (schema → confidence → semantic drift), before output is allowed into `SDLCState`.
 - **Feedback Agent (§E.5)** is the named response to repeated failure — it does root-cause synthesis across failure history, not a blind retry. If its revised approach also fails, the system escalates to a human (Fail-Closed).
 - **Intent Tracker (§E.7)** runs on every new user message (including HITL responses) to catch scope drift before it corrupts an in-flight implementation.
+
+### 5.1 Communication Architecture Summary
+
+Full detail in §D.9 of the blueprint. One invariant governs everything else in this subsection: **workers never talk to workers.** All coordination between concurrently-dispatched units of work is mediated — by the Phase Manager, the Fan-in Coordinator, `SDLCState`, the Blackboard, Repository Intelligence, or HITL — never peer-to-peer.
+
+- **Worker Coordination Packet (WCP, §B.2/§D.9.2)** — every parallel worker emits one structured self-report (assumptions, discovered dependencies, interface changes, confidence) on branch exit, produced as part of its normal output rather than a second LLM call. This is what the Fan-in Coordinator uses to catch assumption drift that a raw diff wouldn't surface.
+- **Fan-in Coordinator (§D.4.1)** — a deterministic graph node, *not* an agent or LLM call. Detects file-level and WCP-based semantic overlap, decides merge vs. serialize-and-rerun, and is the only thing authorized to trigger a bounded (≤1 per group per attempt) Manager replan.
+- **ClarificationEscalation protocol (§D.9.3)** — when a worker's assumptions break mid-task, it consults Repository Intelligence first, then stops its own branch and escalates (never guesses, never messages a peer). The Manager resolves the batch from design docs + RI; HITL is reached only for genuine requirement/scope/policy ambiguity.
+- **ReplanContext (§B.2/§D.5)** — every replan (Feedback Agent, Fan-in-triggered, or otherwise) is handed structured history of prior attempts, so each attempt is strictly better-informed, never a blind re-run.
+- **Explicitly rejected (§D.9.7):** worker↔worker messaging, swarm/debate/voting for core workflow, always-on coordination windows, recursive worker spawning, and an LLM-driven Merge Resolution Agent — merge conflicts are resolved deterministically (serialize-and-rerun), never by asking a model to reconcile two diffs.
 
 ---
 

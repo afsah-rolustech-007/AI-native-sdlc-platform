@@ -246,17 +246,79 @@ class ValidationFlag(TypedDict):
     rollback_to: str | None           # Phase name if rollback recommended
 
 class HITLRequest(TypedDict):
+    """Every human-facing pause is one of these four types — never an untyped
+    'question'. The `request_type` discriminant is what Phase 09's UI (Screens
+    7/8) and RBAC filtering (§S) key off, replacing the earlier "type=clarification
+    equivalent" convention with an explicit, schema-level field."""
     request_id: str
+    request_type: Literal["clarification", "approval", "policy_review", "risk_approval"]
     phase: str
     reason: str
     evidence_ref: str                 # Blackboard pointer — not inlined
     options: list[str]
     response: str | None
     responded_by: str | None
-    responded_at: datetime | NoneMASC as a quality inspector.
-
-Every agent produces output.
+    responded_at: datetime | None
     timeout_at: datetime
+
+class WorkerCoordinationPacket(TypedDict):
+    """Mandatory, structured self-report every parallel worker (CodeGen sub-agent,
+    and any future Send-dispatched worker) emits on branch exit — success or stop.
+    Produced as part of the SAME model call that produces the worker's primary
+    output wherever possible (structured-output schema, §E.3), not a second LLM
+    round-trip. This is what the Fan-in Coordinator (§D.4) reads to detect
+    assumption drift and cross-worker interface conflicts that raw diffs alone
+    would not surface until much later (Integration Validator, or worse, QA)."""
+    subtask_id: str
+    worker_id: str
+    assumptions: list[str]                       # what the worker believed true
+    discovered_dependencies: list[str]            # symbols/files touched beyond its assigned scope
+    interface_changes: list[dict]                 # [{symbol, before, after}]
+    risks: list[str]
+    touches_files: list[str]                      # authoritative for fan-in overlap detection
+    confidence: float
+    needs_manager_attention: bool                 # True → Fan-in Coordinator must route to Manager
+    blocked: bool                                 # True → this branch stopped; see ClarificationEscalation
+    artifact_refs: list[str]                      # Blackboard pointers (diff, logs)
+
+class ClarificationEscalation(TypedDict):
+    """Emitted by a worker that cannot safely continue — either Repository
+    Intelligence could not resolve what it needed, or a discovery invalidates
+    an assumption baked into TaskDecomposition. A worker NEVER guesses past
+    this point (Fail-Closed, Principle 8) and NEVER contacts another worker
+    directly (§D.9's communication invariant) — it stops its own branch and
+    escalates to the Manager, batched at fan-in. HITL is reached only if the
+    Manager itself cannot resolve the escalation from ArchitectureDoc/RI."""
+    escalation_id: str
+    subtask_id: str
+    worker_id: str
+    category: Literal["missing_context", "broken_assumption", "interface_conflict", "scope_ambiguity"]
+    question: str
+    evidence_refs: list[str]                      # Blackboard pointers (what RI returned, if anything)
+    proposed_default: str | None                  # Worker's best guess, never auto-applied
+    confidence: float
+    ri_consulted: bool                             # Must be True except for pure scope-ambiguity cases
+    created_at: datetime
+    resolved_at: datetime | None
+    resolution: Literal["redispatched", "hitl_resolved", "superseded"] | None
+
+class ReplanContext(TypedDict):
+    """Structured history handed to a Manager on any replanning attempt (Feedback
+    Agent revision, FL-05 re-assignment, or a Fan-in-Coordinator-triggered replan
+    from flagged WCPs/ClarificationEscalations) so each attempt is strictly better
+    informed than the last, rather than re-reasoning from scratch. This is what
+    makes 'attempt_number' in FeedbackReport (§D.8) meaningful instead of cosmetic."""
+    task_id: str
+    attempt_number: int
+    previous_decomposition: TaskDecomposition
+    previous_assumptions: list[str]                # aggregated from prior WCPs
+    validator_findings: list[dict]                 # prior FeedbackReport.validator_findings
+    wcp_summaries: list[str]
+    unresolved_clarifications: list[ClarificationEscalation]
+    prior_manager_decisions: list[str]
+    affected_worker_ids: list[str]
+    repo_discoveries: list[str]                    # net-new facts surfaced since original decomposition
+    unresolved_risks: list[str]
 
 class SDLCState(TypedDict):
     # ── Identity ──────────────────────────────────────────────────────
@@ -272,9 +334,16 @@ class SDLCState(TypedDict):
     deployment_record: DeploymentRecord | None
     
     # ── Communication channels (append-only) ──────────────────────────
+    # `messages` is EXCLUSIVELY the human/system conversation transcript (user
+    # requests, HITL responses, system notices feeding the Intent Tracker,
+    # §E.7). It is never a channel for agent-to-agent or worker-to-worker
+    # communication — that traffic has its own typed channels below. See
+    # §D.9's communication invariant for the rule this field must never violate.
     messages: Annotated[list, add_messages]
-    agent_events: Annotated[list[dict], append_only]
+    agent_events: Annotated[list[dict], append_only]           # Observability only — UI/OTel, never control flow
     feedback_reports: Annotated[list[dict], append_only]  # Structured, not bare "try again"
+    worker_coordination_packets: Annotated[list[dict], append_only]  # WorkerCoordinationPacket entries, this fan-out round
+    clarification_escalations: Annotated[list[dict], append_only]    # ClarificationEscalation entries, open + resolved
     
     # ── Validation & Safety ───────────────────────────────────────────
     validation_flags: Annotated[list[ValidationFlag], append_only]
@@ -474,8 +543,8 @@ Orchestrator Graph (per Task)
 ├── Requirements Subgraph
 ├── Design Subgraph
 ├── Implementation Subgraph
-│   ├── [Send API → parallel CodeGen instances]
-│   └── [Fan-in → Conflict Check → Integration Validator]
+│   ├── [Send API → parallel CodeGen instances, isolated worktrees]
+│   └── [Fan-in Coordinator (deterministic, §D.4.1) → Integration Validator]
 ├── QA Subgraph
 │   └── [Send API → parallel QA tool runners]
 ├── Review Subgraph
@@ -530,7 +599,26 @@ Backward edges (explicit, not implicit):
 
 Fan-out via `Send` API for: independent implementation sub-tasks, parallel QA tool runners, embedding generation.
 
-Fan-in aggregator node: explicitly checks for overlapping file edits across branches before merging. Overlapping branches are serialized and re-run sequentially, not silently merged.
+### D.4.1 Fan-in Coordinator (deterministic, not an agent)
+
+Every fan-out (`Send`) is closed by a **Fan-in Coordinator** graph node. This is explicitly **not an LLM call, not an agent, and not a reasoning component** — it is a deterministic function over the branch outputs and their `WorkerCoordinationPacket`s (§D.9.2). Its job is to decide, by rule, what happens next; it never generates or resolves code itself.
+
+**Decisions the Fan-in Coordinator performs, in order:**
+
+1. **Overlap detection** — computes the file set touched by each branch (`WorkerCoordinationPacket.touches_files`, cross-checked against the actual diff) and flags any pairwise overlap.
+2. **Semantic conflict detection (WCP-based)** — independent of file overlap, checks whether any branch's `interface_changes` are read/relied-upon by another branch's `assumptions`/`discovered_dependencies`. This is what catches "no file overlap, but branch B assumed a signature branch A just changed" — a class of conflict file-level overlap alone cannot see.
+3. **Merge eligibility** — branches with no file overlap and no flagged semantic conflict are merged into the integration worktree.
+4. **Serialization** — overlapping branches (by file or by flagged semantic conflict) are discarded and re-dispatched *sequentially* (second sees the first's applied change), never silently auto-merged.
+5. **Replanning trigger** — if any `WorkerCoordinationPacket.needs_manager_attention` is set, or a `ClarificationEscalation` was raised (§D.9.3) by any branch, the Coordinator batches these and routes to the Implementation Manager for a bounded replan (§D.9.6) *before* proceeding to Integration Validator — capped at one replan per parallel group per attempt.
+6. **Validator triggering** — once merge/serialization/replan resolve cleanly, dispatches to `Integration Validator`.
+
+Overlapping/conflicting branches are **never** silently merged — this correctness-over-throughput stance is unchanged from earlier revisions of this document, now made precise by having the Coordinator's exact decision list written down instead of left to "the fan-in node checks for overlaps."
+
+**File-level overlap detection is the v1 granularity, by design** — it is the simplest mechanism that is never *wrong in the unsafe direction* (it may over-trigger a re-run on two agents editing unrelated parts of the same large file, but it will never miss a real conflict the way naive line-level diffing could). Finer-grained detection is future roadmap only, not v1:
+
+- **Symbol-level overlap** (two branches touch different functions in the same file — currently treated as a conflict at file granularity) — revisit once real conflict-rate data (Phase 15's loop-trigger-rate KPI) shows file-level granularity is a genuine throughput problem, not before.
+- **AST-level / semantic dependency-graph overlap detection** (beyond the WCP-based interface-change check in decision 2 above) — a research-track item, not scheduled into any v1 phase.
+- **Any LLM-assisted "predict likely conflicts before dispatch" mechanism** — evaluated and deferred; the deterministic post-hoc check above is cheaper and more auditable than a predictive model that could be wrong in either direction.
 
 At high task volume, concurrent graphs hit shared Repository Intelligence stores. Mitigation: read/write separation (incremental-indexing writes → primary; agent-execution reads → replicas).
 
@@ -540,6 +628,8 @@ Per-node `retry_policy` (LangGraph native) with exponential backoff; max attempt
 
 1. Route to Feedback Agent (synthesizes correction from failure history).
 2. If Feedback Agent's revised approach still fails → human escalation (Fail-Closed, Principle 8).
+
+**Replanning is never reasoning from a blank slate.** Any node that triggers a replan (Feedback Agent, `FL-05` re-assignment, or the Fan-in Coordinator's replan trigger above) constructs a `ReplanContext` (§B.2) from the task's accumulated `feedback_reports`, `worker_coordination_packets`, and `clarification_escalations`, and hands it to the responsible Manager alongside the new instructions. `attempt_number` (§D.8) is only meaningful because `ReplanContext` makes each attempt strictly more informed than the last — without it, a "3rd attempt" would just be the 1st attempt run three times.
 
 
 
@@ -558,7 +648,19 @@ Never conflate these. LangGraph checkpoints are for debugging and resuming the p
 
 `interrupt()` calls immediately before irreversible transitions (design approval, release, deployment). Rendered via `ApprovalGate` template (§E.1). Resume via `Command(resume=...)`. Rendered concretely in §P.
 
-## D.8 Feedback Reports (Structured, Not Bare)
+Every human-facing pause is a `HITLRequest` (§B.2) with an explicit `request_type` discriminant — `clarification` (open requirements question, Requirements Analyst), `approval` (an `ApprovalGate` checkpoint — scope/design/pr/deployment), `policy_review` (a `WorkflowProfile` rule requires human sign-off on a routing decision itself, not on task content), or `risk_approval` (a Critical-risk-tier escalation that doesn't map to a normal checkpoint, e.g. a Feedback Agent's second failed revision). This is what Screen 7 vs. Screen 8 (§P) and RBAC filtering (§S) key off — there is no separate implicit "type" convention layered on top of the schema.
+
+## D.8 Feedback Reports vs. Clarification Escalations (Structured, Never Bare)
+
+Two distinct failure/uncertainty signals exist, and the architecture deliberately keeps them separate rather than merging them into one generic "problem" object:
+
+| | `FeedbackReport` | `ClarificationEscalation` (§B.2) |
+|---|---|---|
+| **When raised** | *After* a Validator/MASC/QA check rejects a completed output | *Before* a worker completes — it cannot safely finish at all |
+| **Who raises it** | `Validator`, MASC, QA agents | The worker itself (CodeGen sub-agent, or any future parallel worker) |
+| **Contains** | What was wrong with a finished artifact | What is unknown, or which assumption broke, mid-work |
+| **Routes to** | The producing agent (retry) or, on exhaustion, Feedback Agent | The Fan-in Coordinator → Implementation Manager (batched), never another worker |
+| **Never** | A bare "try again" | A silent guess in place of the missing information |
 
 Every feedback loop carries a `FeedbackReport`:
 
@@ -573,11 +675,185 @@ class FeedbackReport(TypedDict):
     attempt_number: int
 ```
 
-Agents receive structured findings, not bare retry signals.
+Agents receive structured findings, not bare retry signals. `ClarificationEscalation`'s schema is defined in §B.2, alongside `WorkerCoordinationPacket` and `ReplanContext` — all three exist for the same reason `FeedbackReport` does: structured, typed communication instead of free-form text passed between graph nodes.
 
-## D.9 Agent Communication Protocol
+## D.9 Agent Communication Architecture
 
-Structured Pydantic schemas through shared state. Large payloads (diffs, logs, QA evidence) stored in a **blackboard** (artifact store) and referenced by pointer. Never inlined into graph state.
+### D.9.1 The Communication Invariant
+
+**Workers never communicate directly with other workers. Peer-to-peer agent messaging is architecturally forbidden — not merely undocumented.** This is a project-wide rule, not a per-phase convention, and it is what makes every mechanism in this section (and in §E) safe to reason about, checkpoint, and audit.
+
+All coordination between concurrently-running units of work happens exclusively through one of:
+
+- **The Phase Manager** that dispatched them (decomposition, replanning, redispatch)
+- **The Fan-in Coordinator** (§D.4.1) — deterministic, not an agent
+- **`SDLCState`** — shared, reducer-governed graph state
+- **The Blackboard** (§D.9.4) — pointer-referenced artifact store
+- **Repository Intelligence** (§G) — shared, read-mostly service
+- **HITL** (§D.7) — only for requirement/scope/business/policy ambiguity, never for "what does another agent's output mean"
+
+A worker that needs something from another worker's output waits for fan-in and reads the result from `SDLCState`/blackboard — it does not, and structurally cannot, message that worker directly. This is also the project's deadlock-prevention strategy: because no worker ever waits *on another worker*, worker-to-worker circular waits are not a reachable state. The only waits are worker→Manager/HITL (never circular, since Managers and HITL do not wait on workers they dispatched) and standard node retry/timeout (§D.5, §E.1).
+
+**Explicitly rejected as violations of this invariant (see §D.9.7 for the full list):** direct worker↔worker messaging, swarm/emergent multi-agent coordination, always-on multi-agent "meeting" rounds, an LLM-driven Merge Resolution Agent negotiating conflicting diffs, recursive worker spawning, and using the `messages` field (§B.2) as an inter-agent bus.
+
+### D.9.2 Worker Coordination Packet (WCP)
+
+Every parallel worker (currently: CodeGen sub-agents, §E.8; any future `Send`-dispatched worker inherits this contract) emits a `WorkerCoordinationPacket` (schema in §B.2) on branch exit, whether it completed or stopped itself via `ClarificationEscalation`.
+
+| Property | Value |
+|---|---|
+| **Producer** | The worker itself, as part of its normal completion output |
+| **Consumer** | Fan-in Coordinator (§D.4.1); Implementation Manager on replan (via `ReplanContext`) |
+| **Lifecycle** | One WCP per worker per dispatch; appended to `SDLCState.worker_coordination_packets` (`append_only`); superseded (not deleted) on redispatch |
+| **Storage** | Small structured fields inline in `SDLCState`; `artifact_refs` field points to the Blackboard for the actual diff/logs |
+| **Validation** | Schema-validated the same way any agent output is (MASC Check 1, §E.6) — a malformed WCP is treated as `needs_manager_attention=true` (Fail-Closed), never silently dropped |
+| **Token cost** | Designed to be produced as structured-output fields of the *same* model call that produces the worker's diff — not a second LLM round-trip. A worker only needs a second call if its first output's WCP fields are incomplete, which MASC's schema check catches |
+| **Relationship to Fan-in** | Primary input to Coordinator decisions 1–2–5 (§D.4.1) |
+| **Relationship to Validators** | Independent of `Validator`(implementation) and Integration Validator — a WCP reports the worker's own beliefs; it is not itself a validation result |
+| **Relationship to Replanning** | Aggregated into `ReplanContext.wcp_summaries` (§B.2) so a Manager replanning after a flagged WCP sees exactly what was discovered, not a re-summary |
+
+**Minimum-information principle:** the WCP schema (§B.2) intentionally excludes free-text "notes" or "reasoning" fields beyond `risks`/`assumptions` as short strings — anything longer belongs on the Blackboard via `artifact_refs`, keeping the packet itself cheap to read at fan-in.
+
+### D.9.3 Clarification Escalation Protocol
+
+The largest gap identified in the pre-implementation communication audit — "what happens when a worker discovers its assumptions are wrong mid-task" — is closed by this protocol, not by opening a channel to another agent.
+
+```
+Worker blocked or assumption invalidated
+        │
+        ▼
+Repository Intelligence consulted (always first — cheapest, no peer/human cost)
+        │
+   still blocked?
+        │ yes
+        ▼
+Worker emits ClarificationEscalation (§B.2), sets WorkerCoordinationPacket.blocked=true,
+stops its own branch (does not guess; Fail-Closed) — sibling branches are unaffected and continue
+        │
+        ▼
+Fan-in Coordinator batches all escalations from the parallel group (D.4.1 decision 5)
+        │
+        ▼
+Implementation Manager reasons over the batch using ArchitectureDoc + RI + ReplanContext
+        │
+   ┌────┴─────────────────────────┐
+   │ resolvable from design + RI  │  scope/requirement/business/policy ambiguity
+   ▼                              ▼
+Redispatch affected worker(s)     HITL (request_type=clarification or policy_review)
+with revised instructions         → resume → redispatch
+```
+
+**Rules:**
+
+- **Repository Intelligence first, always** — `ClarificationEscalation.ri_consulted` must be `true` except for pure scope-ambiguity cases where no repo query could possibly answer the question.
+- **Batched, not streamed** — the Manager resolves a whole parallel group's escalations in at most one reasoning pass per batch, not one call per escalation.
+- **A worker never resumes itself** — resolution always comes from the Manager (redispatch) or HITL→Manager; there is no worker↔worker "here's the answer" path.
+- **HITL is the exception, not the default path** — reached only when the Manager cannot resolve the escalation from documents it already has authority over (`ArchitectureDoc`, `RequirementsSpec`, RI). Escalations about "which helper function already exists" are RI questions, not HITL questions.
+- **Interaction with Feedback Loops:** an unresolved `ClarificationEscalation` is not itself a `FeedbackReport` — it precedes completion, a `FeedbackReport` follows a completed-but-rejected output (§D.8's table). If redispatch after clarification still fails validation, the *normal* `FL-04`/Feedback Agent path applies from there.
+- **Interaction with Replanning:** unresolved escalations feed `ReplanContext.unresolved_clarifications` (§B.2) so a later replan doesn't re-ask a question already answered.
+
+### D.9.4 Blackboard — Minimal Service, Available from Phase 6
+
+The blackboard principle (large payloads referenced by pointer, never inlined into graph state) is unchanged from earlier revisions of this document. What changes here: **a minimal Blackboard service must exist by the time Implementation (Phase 6) first produces real diffs — it is not deferred until the Evidence Bundle work in Phase 8.** Phase 8 is free to *enrich* the service (evidence bundle assembly, richer indexing); it does not *originate* it.
+
+Minimum API (deliberately small — do not over-engineer ahead of real usage):
+
+```python
+class BlackboardService(Protocol):
+    def store(self, task_id: str, kind: str, content: bytes | dict) -> str: ...   # returns a pointer ref
+    def retrieve(self, ref: str) -> bytes | dict: ...
+    def exists(self, ref: str) -> bool: ...
+```
+
+A content-addressed or task-scoped Postgres JSONB/table-backed implementation is sufficient at this scale; dedicated object storage is a future-scale concern (see §G.4's federation discussion for the analogous "don't pre-split for scale you don't have yet" reasoning), not something to build ahead of need.
+
+**No separate `BlackboardArtifactRef` wrapper type is introduced.** Every pointer in this document is already a plain `str` field (`evidence_ref`, `artifact_refs`, `artifact_ref`) that `BlackboardService.retrieve()` accepts directly. A typed wrapper class would add an object without adding capability — rejected under the "avoid unnecessary objects" constraint.
+
+### D.9.5 Manager Authority (Who May Spawn, Reassign, Replan)
+
+Explicit, project-wide, not per-phase:
+
+| May do | Manager | Worker |
+|---|---|---|
+| Decompose work into sub-tasks | ✅ | ❌ |
+| Dispatch (`Send`) workers | ✅ | ❌ |
+| Redistribute/reassign work between workers | ✅ | ❌ |
+| Trigger a replan | ✅ | ❌ |
+| Spawn additional workers (recursively) | ❌ (not needed — see §D.9.7) | ❌ |
+| Coordinate directly with another worker | ❌ (Managers coordinate via state/redispatch, not "chat") | ❌ |
+
+Only a Manager (Implementation Manager for the implementation phase; the analogous phase Manager elsewhere) holds `Send` authority. A worker that discovers it needs help does not delegate or reassign anything — it raises a `ClarificationEscalation` and stops; only the Manager redispatches. This keeps `max_parallel_impl_agents` (§F.2) and cost budgets meaningful — an uncontrolled worker-spawns-worker path would make both unenforceable.
+
+### D.9.6 Conditional Coordination (No Always-On Meetings)
+
+Coordination beyond the default isolated-worker → fan-in path happens **only when triggered**, never on a fixed schedule or "just in case":
+
+| Trigger | Resulting coordination |
+|---|---|
+| A `WorkerCoordinationPacket.needs_manager_attention = true` | Fan-in Coordinator batches it into a bounded Manager replan |
+| One or more `ClarificationEscalation`s in a parallel group | Same batched Manager pass (§D.9.3) |
+| Neither of the above | **No coordination step runs at all** — straight to merge/Integration Validator |
+
+**Bound:** at most **one** Manager coordination/replan pass per parallel group per attempt. If that pass's redispatch still fails validation, the task proceeds through the normal `FL-04`/`FL-05`/Feedback Agent escalation chain (§D.5, §D.8) rather than triggering a second ad-hoc coordination round. A dedicated "coordination window" phase between decomposition and implementation, or between implementation and merge, that runs unconditionally on every task was evaluated and rejected (§D.9.7) — it taxes every Low-risk task with LLM rounds that, empirically, most tasks never need.
+
+### D.9.7 Communication Non-Goals (Reject on Sight)
+
+The following are explicitly out of scope for this architecture. Naming them here is deliberate — to prevent future architectural drift toward "just this once" exceptions:
+
+- **Worker ↔ worker communication of any kind**, direct or relayed through a shared mutable object they both poll.
+- **Swarm or emergent multi-agent coordination** for any core SDLC workflow (see the platform's own decentralized-patterns evaluation — swarm/peer-to-peer/voting/auction/full consensus were assessed and rejected for the control plane).
+- **Debate architectures as a default mechanism.** (Bounded, opt-in design-debate for Critical/High-risk design exploration remains a *separate*, policy-gated research track — it is not part of this communication protocol and does not relax the worker-isolation invariant.)
+- **Always-on coordination meetings/windows** that run unconditionally on every task (§D.9.6).
+- **Recursive worker spawning** — only Managers hold `Send` authority (§D.9.5).
+- **An LLM-driven Merge Resolution Agent** that creatively resolves conflicting diffs. Merge conflicts are handled deterministically by the Fan-in Coordinator (overlap/semantic-conflict detection → serialize-and-rerun), never by asking a model to reconcile two diffs into one. This is a correctness and auditability decision, not an oversight: an auto-merged "creative" resolution is exactly the kind of silent, unverifiable change Principle 5 (deterministic/auditable over clever) exists to prevent.
+- **Using `messages` (§B.2) as an inter-agent bus.** It is the human/system conversation transcript only (§B.2's field comment) — agent coordination has its own typed channels (`worker_coordination_packets`, `clarification_escalations`, `feedback_reports`).
+
+### D.9.8 Worker Lifecycle
+
+```
+Created (Send dispatch from Manager)
+   │
+   ▼
+Running (progressive RI context, sandboxed diff generation)
+   │
+   ├──▶ Completed ──▶ emits WorkerCoordinationPacket (blocked=false) ──▶ Fan-in
+   │
+   ├──▶ Blocked ──▶ emits ClarificationEscalation + WCP(blocked=true) ──▶ stops branch
+   │                    │
+   │                    ▼
+   │              Manager resolves (RI/design) or HITL ──▶ Redispatch ──▶ Running (new attempt)
+   │
+   ├──▶ Cancelled (task-level cancellation, §D.9.9) ──▶ worktree/branch cleanup, no WCP required
+   │
+   └──▶ Failed (retries exhausted at this attempt) ──▶ FL-04 → Feedback Agent path (§D.5, §D.8)
+```
+
+A worker's branch is always in exactly one of these states; there is no "waiting on another worker" state, by construction (§D.9.1).
+
+### D.9.9 Cancellation & Cleanup
+
+Task cancellation (human-initiated, or budget/kill-switch-triggered per §B.7) follows a defined sequence rather than being left as an implicit "the graph just stops":
+
+```
+Task Cancel requested
+   │
+   ▼
+Abort graph execution (no further node dispatch; in-flight LLM calls allowed to finish, not killed mid-token)
+   │
+   ▼
+Signal all in-flight worker branches to stop (no new tool calls dispatched)
+   │
+   ▼
+Clean up task-scoped git worktrees/branches (§E.8's CodeGen isolation mechanism) and any sandbox containers
+   │
+   ▼
+Write a final checkpoint recording state="cancelled" and the cancellation reason
+   │
+   ▼
+Persist final `Task` record (state, partial artifacts, cost-to-date) — nothing silently discarded
+```
+
+Cancellation is orthogonal to code rollback (§D.6) — cancelling a task does not revert already-merged code; it stops further orchestration. If already-merged code must be reverted, that is a separate, human-initiated code rollback action.
 
 ---
 
@@ -615,6 +891,7 @@ Validator:              # replaces N bespoke validator-agent classes
 - **Validators are always separate from the producing agent.**
 - **Human approval agents only at genuinely irreversible or high-blast-radius transitions.**
 - **Feedback Agent** is a named, distinct role — what happens after N consecutive failures on the same module (see §E.5).
+- **Only Managers spawn/reassign/replan work (§D.9.5).** A sub-agent that discovers it needs help raises a `ClarificationEscalation` (§D.9.3) and stops its own branch — it never spawns a helper worker, delegates to a peer, or reassigns scope itself. This is the same anti-sprawl discipline as the template rule above, applied to coordination authority rather than to class proliferation.
 
 
 
@@ -758,7 +1035,7 @@ Stop when **any one** is satisfied:
 The named agent that handles repeated failure on the same module — explicitly specified here because neither prior document did so.
 
 - **Trigger:** N consecutive failures on the same module (N = `Task.budget.max_retries_per_node`).
-- **Input:** Full failure history for this task and module; episodic memory of similar past failures and how they were resolved.
+- **Input:** A `ReplanContext` (§B.2) — full failure history for this task and module, prior `WorkerCoordinationPacket`s, any unresolved `ClarificationEscalation`s, and episodic memory of similar past failures and how they were resolved. This is what makes each attempt strictly more informed than the last (§D.5), not a re-read of the same failure in isolation.
 - **Reasoning:** "What is the root pattern across these failures, and what fundamentally different approach should the CodeGen sub-agent try?"
 - **Output:** Revised `TaskDecomposition` entry with a different approach, additional context pointers, and explicit constraints.
 - **If Feedback Agent's output also fails:** escalate to human (Fail-Closed). Never loop indefinitely.
@@ -868,9 +1145,10 @@ class IntentTracker:
 | Agent                       | Responsibility                                                          | Input → Output                                                | Model Tier                                         | Tools                                                                                   | Exit / Failure                                                                                           |
 | --------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | **Implementation Manager**  | Decomposes design into tasks; dependency-aware execution ordering       | Approved design → TaskDecomposition                           | High-capability                                    | `get_dependencies`, `get_dependents`                                                    | Exit: no circular deps; all components covered. Failure: overlapping ownership → resolve before dispatch |
-| **CodeGen Sub-agent (×N)**  | Implements one module/scope per instance (parallel via Send API)        | Module spec + progressive context → diff                      | Fast (simple) / High-capability (complex refactor) | `get_symbol_signature`, `get_symbol_body`, `get_callers`, `get_file_structure`, sandbox | Exit: diff produced; self-check clean. Failure 3×: Feedback Agent                                        |
+| **CodeGen Sub-agent (×N)**  | Implements one module/scope per instance (parallel via Send API); emits `WorkerCoordinationPacket` on exit (§D.9.2), or `ClarificationEscalation` + stops (§D.9.3) if blocked | Module spec + progressive context → diff + WCP                | Fast (simple) / High-capability (complex refactor) | `get_symbol_signature`, `get_symbol_body`, `get_callers`, `get_file_structure`, sandbox | Exit: diff + WCP produced; self-check clean. Failure 3×: Feedback Agent. Never contacts another CodeGen instance directly (§D.9.1) |
+| **Fan-in Coordinator**      | Deterministic (not an agent, not an LLM call) — overlap + WCP semantic-conflict detection, merge/serialize decision, replan trigger (§D.4.1) | All branch diffs + WCPs → merge-eligible set or serialize/replan instruction | — (no model call) | File-set/diff analysis, `WorkerCoordinationPacket` fields | Exit: clean merge or all conflicts serialized/replanned. Never silently auto-merges |
 | `Validator`(implementation) | Static validation: lint/type/security (independent of CodeGen)          | Diff → pass/fail + findings                                   | None (tools only)                                  | ruff, mypy, Semgrep                                                                     | Failure: FeedbackReport to CodeGen sub-agent; 3× max                                                     |
-| **Feedback Agent**          | Synthesizes root cause of repeated failure; proposes different approach | Failure history + episodic memory → revised task instructions | High-capability                                    | Episodic memory                                                                         | Trigger: N consecutive failures on same module. Failure: HITL escalation                                 |
+| **Feedback Agent**          | Synthesizes root cause of repeated failure; proposes different approach | `ReplanContext` (failure history, WCPs, episodic memory) → revised task instructions | High-capability                                    | Episodic memory                                                                         | Trigger: N consecutive failures on same module. Failure: HITL escalation                                 |
 | **Integration Validator**   | Verifies new code integrates correctly; catches interface mismatches    | All merged diffs + interface contracts → pass/fail            | High-capability                                    | `get_callers`, `get_callees`, sandbox integration tests                                 | Failure: FeedbackReport to Implementation Manager                                                        |
 
 
@@ -1721,7 +1999,7 @@ The reflection output is appended to the draft before it enters `Validator`(desi
 | **4. SDLC Phase View**         | Current position in the state machine (§D.3); backward edges shown as visually distinct loops                                              | SDLCState.state                                |
 | **5. Active Agents**           | Which agents are running now and their current tool call                                                                                   | OTel trace stream                              |
 | **6. Live Execution Timeline** | Phase transitions, feedback loops triggered, approvals — chronological                                                                     | agent_events channel                           |
-| **7. Questions Queue**         | Open questions across a human's in-flight tasks, with already-gathered context shown                                                       | hitl_queue where type=clarification            |
+| **7. Questions Queue**         | Open questions across a human's in-flight tasks, with already-gathered context shown                                                       | hitl_queue where request_type="clarification"  |
 | **8. Human Approval Requests** | Evidence bundle (diff, QA summary, confidence breakdown, precedent tasks), decision buttons, timeout countdown                             | ApprovalGate evidence_bundle_spec, HITLRequest |
 | **9. Agent Logs**              | Raw OTel trace detail per agent                                                                                                            | Trace backend                                  |
 | **10. QA Summary**             | Which QA checks ran (§K.1 matrix), results, bug reproduction result first for bug/hotfix                                                   | QAEvidence                                     |
@@ -1745,10 +2023,14 @@ class AgentEvent(TypedDict):
         "agent_token_stream", "agent_completed", "agent_failed",
         "masc_flag", "hitl_required", "hitl_responded",
         "phase_completed", "task_completed",
-        "rollback_initiated", "feedback_loop_triggered"
+        "rollback_initiated", "feedback_loop_triggered",
+        "worker_coordination_packet_emitted", "clarification_escalated",
+        "clarification_resolved", "fan_in_replan_triggered", "task_cancelled"
     ]
     payload: dict
 ```
+
+`AgentEvent` remains purely observational — a projection of already-happened state changes for the UI/OTel trace stream (§D.9's `messages` clarification applies equally here: this channel is never read back by agents to make decisions, only written for humans/dashboards to read).
 
 ---
 
