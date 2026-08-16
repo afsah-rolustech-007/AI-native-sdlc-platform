@@ -10,7 +10,7 @@ Tree-sitter is the platform's foundation for everything symbol-aware: `get_symbo
 
 ## Expected Architecture
 
-`packages/repo_intel/indexers/treesitter.py` wraps `py-tree-sitter` (or `tree-sitter-languages`) to parse files per-language into a normalized `Symbol` model (`{id, kind, name, file_path, start_line, end_line, signature, docstring}`), persisted to Postgres (a `symbols` table — new, not in §R's core list since it's an RI-specific table; document this addition). Parsing is per-file and designed to be called both in bulk (initial index) and per-file (incremental, Section 05).
+`packages/repo_intel/indexers/treesitter.py` wraps `py-tree-sitter` (or `tree-sitter-languages`) to parse files per-language into a normalized `Symbol` model per §G.6.1 (`{id, kind, name, file_path, start_line, end_line, signature, docstring}`), persisted to Postgres (a `symbols` table — new, not in §R's core list since it's an RI-specific table; document this addition). Parsing is per-file and designed to be called both in bulk (initial index) and per-file (incremental, Section 05).
 
 ## Dependencies
 

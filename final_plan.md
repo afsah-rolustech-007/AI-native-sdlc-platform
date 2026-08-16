@@ -76,6 +76,7 @@ A reliable, semi-autonomous AI Software Engineering platform that orchestrates t
 6. **Model- and tool-independence is structural.** Enforced via adapter interfaces, not convention.
 7. **Incremental over big-bang.** Useful on a 500-file repo on day one; scales to 1M+ files by strengthening the same architecture.
 8. **Fail-Closed by Default.** Any internal scoring, policy, or validation mechanism that errors, times out, or returns malformed output routes the task toward *more* human oversight, never toward *more* autonomy. A broken Confidence Scorer does not default to "assume high confidence" — it defaults to "require approval." This applies uniformly across every Part of this document.
+9. **Intentional worker isolation.** Parallel workers are deliberately unaware of sibling workers. Cross-worker knowledge is delayed until Fan-in, never exchanged mid-flight. This is not a limitation — it is what preserves determinism, auditability, reproducibility, reasoning quality, deadlock avoidance, and safe parallelism at scale. The communication invariant (§D.9.1) is the operational expression of this principle; Fan-in is where intentional cross-branch knowledge is first assembled.
 
 
 
@@ -214,6 +215,20 @@ class TaskDecomposition(TypedDict):
     execution_order: list[list[str]]  # [[parallel_group], ...]
     ownership_map: dict[str, str]     # {module_path: sub_agent_id}
 
+class ImplementationResult(TypedDict):
+    """One entry per CodeGen branch outcome. Appended to SDLCState.implementation_results
+    (append_only). Fan-in Coordinator reads entries with status='validated' for merge;
+    'blocked' branches are paired with ClarificationEscalation entries instead."""
+    subtask_id: str
+    worker_id: str
+    attempt_number: int
+    diff_ref: str                     # Blackboard pointer — not inlined
+    touches_files: list[str]          # cross-checked against WCP.touches_files at fan-in
+    status: Literal["validated", "blocked", "failed"]
+    # validated: passed Validator(implementation) for this attempt — eligible for fan-in merge
+    # blocked:   worker stopped via ClarificationEscalation — fan-in batches, does not merge
+    # failed:    validation exhausted or unrecoverable error on this attempt
+
 class QAEvidence(TypedDict):
     static_analysis: dict | None
     security_findings: list[dict]
@@ -273,7 +288,7 @@ class WorkerCoordinationPacket(TypedDict):
     worker_id: str
     assumptions: list[str]                       # what the worker believed true
     discovered_dependencies: list[str]            # symbols/files touched beyond its assigned scope
-    interface_changes: list[dict]                 # [{symbol, before, after}]
+    interface_changes: list[dict]                 # [{symbol, before, after}] — symbol MUST use RI symbol_id format (§G.6.1)
     risks: list[str]
     touches_files: list[str]                      # authoritative for fan-in overlap detection
     confidence: float
@@ -329,7 +344,7 @@ class SDLCState(TypedDict):
     requirements: RequirementsSpec | None
     architecture: ArchitectureDoc | None
     task_decomposition: TaskDecomposition | None
-    implementation_results: Annotated[list[dict], append_only]
+    implementation_results: Annotated[list[ImplementationResult], append_only]
     qa_evidence: QAEvidence | None
     deployment_record: DeploymentRecord | None
     
@@ -484,7 +499,8 @@ Incoming phase manager reads this packet as primary context. Full upstream detai
 
 ## B.7 Cost Governance
 
-- Every Task carries a `budget` (token ceiling, cost ceiling, max retries per node) set by the Workflow Policy Engine at intake.
+- Every Task carries a `budget` (`token_ceiling`, `cost_ceiling_usd`, `max_retries_per_node`). **Until Phase 10:** `Task.budget` is initialized with §B.1 defaults at task creation (`token_ceiling=2_000_000`, `cost_ceiling_usd=20.0`, `max_retries_per_node=3`). Phase 10's `resolve_workflow_profile()` may override `cost_budget_usd` and related limits per task — it does not replace the safety ceilings, only tunes them within bounds.
+- **From Phase 10 onward:** `resolve_workflow_profile()` sets `WorkflowProfile.cost_budget_usd` at intake; the Planning Manager (or intake node) writes the resolved value onto `Task.budget` before downstream agents run.
 - A **kill-switch node** wraps the graph: any task exceeding budget OR a global max-node-visits count is force-routed to human-escalation state.
 - Per-task cost is tracked per agent, per phase, and exported to the evaluation framework.
 - Model routing (§F.3) defaults to cheaper models; escalates to larger models only on validator rejection or low confidence.
@@ -493,7 +509,9 @@ Incoming phase manager reads this packet as primary context. Full upstream detai
 
 ## B.8 Observability
 
-Every graph node emits a structured OTel trace event: `{task_id, node_id, agent_id, phase, model_id, input_tokens, output_tokens, cost_usd, latency_ms, validation_result}`. Full trace retention: 90 days. Summarized episodic outcomes: indefinite. LangSmith/Langfuse for agent trace visualization and token cost per agent per task.
+Every graph node emits a structured OTel trace event: `{task_id, node_id, agent_id, phase, model_id, input_tokens, output_tokens, cost_usd, latency_ms, validation_result}`. Full trace retention: 90 days. Summarized episodic outcomes: indefinite. LangSmith/Langfuse for agent trace visualization and token cost per task.
+
+**`AgentEvent` (§P) is observational only.** It exists for logging, tracing, metrics, debugging, and auditability — the UI/OTel projection of what already happened. Routing, scheduling, planning, and replanning must **never** read `AgentEvent` or `agent_events` from `SDLCState` to make decisions. Orchestration inputs are exclusively: `SDLCState` typed channels, Validators, Repository Intelligence, Workflow Policy Engine outputs, and Manager reasoning over those sources.
 
 ---
 
@@ -543,8 +561,11 @@ Orchestrator Graph (per Task)
 ├── Requirements Subgraph
 ├── Design Subgraph
 ├── Implementation Subgraph
-│   ├── [Send API → parallel CodeGen instances, isolated worktrees]
-│   └── [Fan-in Coordinator (deterministic, §D.4.1) → Integration Validator]
+│   ├── Implementation Manager (decompose + pre-dispatch check, §D.4.2)
+│   ├── [Send API → parallel CodeGen instances, isolated worktrees (§D.4.3)]
+│   │     each branch: CodeGen → Validator(implementation) [per-branch, tool-only, §D.4.1]
+│   ├── Fan-in Coordinator (deterministic, §D.4.1)
+│   └── Integration Validator (§E.8 — BaseAgent with tool calls, not a Validator template)
 ├── QA Subgraph
 │   └── [Send API → parallel QA tool runners]
 ├── Review Subgraph
@@ -560,6 +581,22 @@ Repository Intelligence Service (shared, federated, never task-scoped)
 ## D.2 State & Conditional Routing
 
 One subgraph per phase. The `WorkflowProfile` (§F.1) sets a flag per node (`active | skipped | parallel_eligible`) consumed by conditional edges *inside* that single subgraph. **Not** maintained as multiple subgraph variants — same flexibility, one fewer moving part.
+
+### D.2.1 Task ↔ Graph Phase Synchronization
+
+`Task.state` (§B.1, Postgres `tasks.state`) is the **durable source of truth** for which SDLC phase a task is in. `SDLCState` does **not** carry a `task_state` field — graph position is tracked via `Task.state` plus LangGraph checkpoint state.
+
+| Event | Who updates | What is written |
+|---|---|---|
+| Graph node entry (phase transition) | The entering node's wrapper (shared middleware or each phase Manager's entry hook) | `update_task_state(task_id, TaskState.<phase>)` via `task_repository` |
+| Feedback-loop backward edge | The routing node that fires the backward edge | `Task.state` set to the reentry phase (§D.3 rollback table) |
+| Task completion | Terminal node (`monitoring` exit or `done` handler) | `TaskState.DONE` |
+| Kill-switch / budget exceeded | Kill-switch handler | `TaskState.BLOCKED` |
+| Task cancellation | Cancellation handler (§D.9.9) | `Task.state` preserved as last active phase; cancellation reason stored on Task/checkpoint |
+
+**UI synchronization:** Screen 4 (§P) reads `Task.state` for current phase and derives transition history from `agent_events` (observability only — never used for routing). `GET /tasks/{id}/phase-history` returns ordered transitions including backward edges.
+
+**Graph synchronization:** LangGraph checkpoint holds in-flight `SDLCState`; `Task.state` is updated at node boundaries so restarts and UI queries agree without reading checkpoint internals.
 
 ## D.3 Phase State Machine
 
@@ -599,18 +636,52 @@ Backward edges (explicit, not implicit):
 
 Fan-out via `Send` API for: independent implementation sub-tasks, parallel QA tool runners, embedding generation.
 
+### D.4.0 Canonical Implementation Subgraph Order
+
+Every document describing the implementation phase MUST use this exact sequence:
+
+```
+Implementation Manager
+  → Send fan-out (one branch per sub-task in each parallel group)
+       Per branch (isolated worktree, §D.4.3):
+         1. CodeGen Sub-agent → diff + WorkerCoordinationPacket (Blackboard refs)
+         2. Validator(implementation) [static-analysis, tool-only, independent of CodeGen]
+              ├─ pass → append ImplementationResult(status="validated") — branch eligible for fan-in
+              └─ fail → FL-04 → FeedbackReport → retry CodeGen (same subtask_id, attempt_number++)
+                        └─ 3× fail on same module → Feedback Agent → HITL if still failing
+  → Fan-in Coordinator (§D.4.1) — all branches in the parallel group complete or blocked
+  → Integration Validator (merged diff set)
+       └─ fail → FL-05 → Implementation Manager (re-assign, max 2×)
+```
+
+**Key invariant:** `Validator(implementation)` runs **per branch, before Fan-in** — never on the merged result. Only branches with `ImplementationResult.status="validated"` enter merge eligibility. `FL-04` targets the originating CodeGen sub-agent because validation is per-diff, not post-merge.
+
 ### D.4.1 Fan-in Coordinator (deterministic, not an agent)
 
-Every fan-out (`Send`) is closed by a **Fan-in Coordinator** graph node. This is explicitly **not an LLM call, not an agent, and not a reasoning component** — it is a deterministic function over the branch outputs and their `WorkerCoordinationPacket`s (§D.9.2). Its job is to decide, by rule, what happens next; it never generates or resolves code itself.
+Every fan-out (`Send`) is closed by a **Fan-in Coordinator** graph node. This is explicitly **not an LLM call, not an agent, and not a reasoning component** — it is a deterministic function over branch outputs and their `WorkerCoordinationPacket`s (§D.9.2). Its job is to decide, by rule, what happens next; it never generates or resolves code itself.
+
+**Input scope:** Fan-in runs only after every branch in the parallel group has either (a) produced an `ImplementationResult` with `status="validated"`, or (b) stopped with `status="blocked"` and a `ClarificationEscalation`. Branches mid-FL-04 retry do not trigger fan-in — LangGraph keeps the branch open until validation passes or exhausts.
 
 **Decisions the Fan-in Coordinator performs, in order:**
 
-1. **Overlap detection** — computes the file set touched by each branch (`WorkerCoordinationPacket.touches_files`, cross-checked against the actual diff) and flags any pairwise overlap.
-2. **Semantic conflict detection (WCP-based)** — independent of file overlap, checks whether any branch's `interface_changes` are read/relied-upon by another branch's `assumptions`/`discovered_dependencies`. This is what catches "no file overlap, but branch B assumed a signature branch A just changed" — a class of conflict file-level overlap alone cannot see.
-3. **Merge eligibility** — branches with no file overlap and no flagged semantic conflict are merged into the integration worktree.
-4. **Serialization** — overlapping branches (by file or by flagged semantic conflict) are discarded and re-dispatched *sequentially* (second sees the first's applied change), never silently auto-merged.
-5. **Replanning trigger** — if any `WorkerCoordinationPacket.needs_manager_attention` is set, or a `ClarificationEscalation` was raised (§D.9.3) by any branch, the Coordinator batches these and routes to the Implementation Manager for a bounded replan (§D.9.6) *before* proceeding to Integration Validator — capped at one replan per parallel group per attempt.
-6. **Validator triggering** — once merge/serialization/replan resolve cleanly, dispatches to `Integration Validator`.
+1. **WCP selection** — for each `subtask_id`, consider only the `WorkerCoordinationPacket` with the highest `attempt_number` (superseded WCPs from prior attempts are ignored, not deleted).
+2. **Overlap detection** — computes the file set touched by each validated branch (`WorkerCoordinationPacket.touches_files`, cross-checked against `ImplementationResult.touches_files` and the actual diff from Blackboard) and flags any pairwise overlap.
+3. **Semantic conflict detection (WCP-based, deterministic)** — independent of file overlap, applies the rules in §D.4.1.1.
+4. **Merge eligibility** — validated branches with no file overlap and no flagged semantic conflict are merged into the integration worktree (§D.4.3).
+5. **Serialization** — overlapping branches (by file or by flagged semantic conflict) are discarded and re-dispatched *sequentially* per §D.4.4 — never silently auto-merged.
+6. **Replanning trigger** — if any `WorkerCoordinationPacket.needs_manager_attention` is set, or a `ClarificationEscalation` was raised (§D.9.3) by any branch, the Coordinator batches these and routes to the Implementation Manager for a bounded replan (§D.9.6) *before* proceeding to Integration Validator — capped at one replan per parallel group per attempt.
+7. **Integration Validator triggering** — once merge/serialization/replan resolve cleanly, dispatch to `Integration Validator`.
+
+#### D.4.1.1 WCP Semantic-Conflict Matching Rules (v1, deterministic, no LLM)
+
+For each unordered pair of branches `(A, B)` where both have `status="validated"`:
+
+1. **Symbol normalization:** every `interface_changes[].symbol` and every token extracted from `assumptions`/`discovered_dependencies` is normalized to RI `symbol_id` format: `{file_path}::{qualified_name}` (§G.6.1). Strip whitespace; lowercase file paths; leave qualified names case-sensitive.
+2. **Direct symbol match:** conflict if any `A.interface_changes[].symbol` equals any entry in `B.assumptions` or `B.discovered_dependencies` after normalization, OR vice versa.
+3. **Substring fallback (assumptions only):** if step 2 finds no match, conflict if any normalized `A.interface_changes[].symbol` appears as a substring in any normalized `B.assumptions` string (or vice versa). Do **not** apply substring matching to `discovered_dependencies` — exact symbol_id match only for that field.
+4. **RI caller cross-check:** for each `interface_changes[].symbol` in branch A, call `get_callers(symbol, depth=1)`. Conflict if any caller's `symbol_id` appears in branch B's `assumptions` or `discovered_dependencies` (normalized exact match).
+5. **Parse failure → Fail-Closed:** if any WCP field required for steps 1–4 is missing or fails schema validation, set `needs_manager_attention=true` on that WCP and route to Manager replan (step 6 above) — never silently treat as non-conflicting.
+6. **RI unavailable during cross-check:** if step 4's RI call fails or times out, treat as conflict (Fail-Closed) and flag for serialize-and-rerun or Manager replan — never assume no conflict.
 
 Overlapping/conflicting branches are **never** silently merged — this correctness-over-throughput stance is unchanged from earlier revisions of this document, now made precise by having the Coordinator's exact decision list written down instead of left to "the fan-in node checks for overlaps."
 
@@ -622,12 +693,56 @@ Overlapping/conflicting branches are **never** silently merged — this correctn
 
 At high task volume, concurrent graphs hit shared Repository Intelligence stores. Mitigation: read/write separation (incremental-indexing writes → primary; agent-execution reads → replicas).
 
+### D.4.2 Pre-dispatch Overlap Check (deterministic, Manager-owned)
+
+Before the Implementation Manager calls `Send()` for any parallel group, it **may** run one lightweight, deterministic validation — no LLM call, no prediction, no new agent. This is an optimization only; the Fan-in Coordinator (§D.4.1) remains the **final authority** for overlap and conflict detection after workers complete.
+
+The Manager compares, using Repository Intelligence and the proposed `TaskDecomposition`:
+
+- `ownership_map` — which sub-task claims which module/file scope
+- planned file sets per sub-task (from decomposition + RI file index lookups)
+- dependency graph consistency (`get_dependencies` / `get_dependents`)
+
+If obvious file-level overlap is detected among sub-tasks scheduled to run in the **same parallel group**, the Manager adjusts decomposition **before dispatch** — typically by merging overlapping sub-tasks or moving one to a later sequential group. If no overlap is found, dispatch proceeds unchanged.
+
+This check never replaces Fan-in validation. Workers may still touch files outside their assigned scope during execution; Fan-in + WCP semantic-conflict detection catches that. The pre-dispatch check only reduces avoidable fan-out/re-run cycles when overlap is already visible in the plan.
+
+### D.4.3 Git Isolation Contract
+
+Minimal, binding rules for parallel CodeGen and Fan-in merge. No new agents — enforced by sandbox + worktree permissions.
+
+| Concept | Convention |
+|---|---|
+| **Base commit** | `task_base_sha` — repo HEAD at Implementation Manager dispatch time; immutable for the task attempt |
+| **Per-branch worktree** | `{repo_root}/.sdlc/worktrees/{task_id}/{subtask_id}/` on branch `sdlc/{task_id}/{subtask_id}` |
+| **Integration worktree** | `{repo_root}/.sdlc/worktrees/{task_id}/integration/` on branch `sdlc/{task_id}/integration` |
+| **Branch naming** | `sdlc/{task_id}/{subtask_id}` for workers; `sdlc/{task_id}/integration` for merged result |
+| **Allowed writers** | CodeGen sub-agent → its own per-branch worktree only. Fan-in Coordinator → integration worktree only. No other component writes git state during implementation. |
+| **Merge authority** | Only Fan-in Coordinator applies validated branch diffs into the integration worktree. Workers never merge into integration or sibling worktrees. |
+| **Serialize-and-rerun replay** | On serialization (§D.4.4): discard affected branch worktrees, recreate from `task_base_sha`, re-dispatch sequentially — second branch's worktree is created **after** first branch's diff is applied to integration, then branched from integration HEAD so it sees the first branch's applied change. |
+| **Cleanup** | Remove all `{task_id}` worktrees/branches on: successful Implementation phase exit, task cancellation (§D.9.9), or task completion. Partial cleanup on fan-in merge success is allowed but full task cleanup is mandatory at phase exit. |
+
+**Blackboard pointer format (all services):** `{task_id}/{kind}/{uuid}` — e.g. `abc123/diff/7f3a…`. Returned by `BlackboardService.store()`; accepted by `retrieve()` and `exists()`.
+
+### D.4.4 Serialize-and-Rerun LangGraph Flow
+
+When Fan-in decision 5 (serialization) fires:
+
+1. Fan-in Coordinator marks the conflicting `ImplementationResult` entries as superseded (new attempt will produce fresh entries).
+2. Returns `Command(goto="codegen_sequential_redispatch")` — **not** a new `Send` fan-out. The conflicting sub-tasks run as ordinary sequential graph nodes (group size = 1), in dependency order determined by the Manager.
+3. Each redispatched sub-task increments `attempt_number`; idempotency checks (§D.9.8) key on `(task_id, subtask_id, attempt_number)`.
+4. Each redispatched branch repeats the full per-branch path: CodeGen → Validator(implementation) → append new `ImplementationResult`.
+5. After all serialized branches complete validation, Fan-in Coordinator **re-runs** decisions 1–7 on the new result set — it does not proceed to Integration Validator until the serialized group is conflict-free or escalates via replan/HITL.
+6. Manager interaction: if serialization alone cannot resolve (e.g. circular semantic dependency), Fan-in triggers the bounded Manager replan (§D.9.6) with assembled `ReplanContext` before a third fan-out attempt.
+
 ## D.5 Retry & Failure Routing
 
 Per-node `retry_policy` (LangGraph native) with exponential backoff; max attempts from `Task.budget.max_retries_per_node`. After retry exhaustion:
 
 1. Route to Feedback Agent (synthesizes correction from failure history).
 2. If Feedback Agent's revised approach still fails → human escalation (Fail-Closed, Principle 8).
+
+**Workers must be idempotent (§D.9.8).** Retries, checkpoint replay, and interrupt/resume must never produce duplicate side effects (double commits, double sandbox runs, duplicate WCP entries for the same completed subtask). LangGraph may re-enter a node; the worker's responsibility is to detect prior completion for its `subtask_id` and exit cleanly rather than repeat work.
 
 **Replanning is never reasoning from a blank slate.** Any node that triggers a replan (Feedback Agent, `FL-05` re-assignment, or the Fan-in Coordinator's replan trigger above) constructs a `ReplanContext` (§B.2) from the task's accumulated `feedback_reports`, `worker_coordination_packets`, and `clarification_escalations`, and hands it to the responsible Manager alongside the new instructions. `attempt_number` (§D.8) is only meaningful because `ReplanContext` makes each attempt strictly more informed than the last — without it, a "3rd attempt" would just be the 1st attempt run three times.
 
@@ -649,6 +764,32 @@ Never conflate these. LangGraph checkpoints are for debugging and resuming the p
 `interrupt()` calls immediately before irreversible transitions (design approval, release, deployment). Rendered via `ApprovalGate` template (§E.1). Resume via `Command(resume=...)`. Rendered concretely in §P.
 
 Every human-facing pause is a `HITLRequest` (§B.2) with an explicit `request_type` discriminant — `clarification` (open requirements question, Requirements Analyst), `approval` (an `ApprovalGate` checkpoint — scope/design/pr/deployment), `policy_review` (a `WorkflowProfile` rule requires human sign-off on a routing decision itself, not on task content), or `risk_approval` (a Critical-risk-tier escalation that doesn't map to a normal checkpoint, e.g. a Feedback Agent's second failed revision). This is what Screen 7 vs. Screen 8 (§P) and RBAC filtering (§S) key off — there is no separate implicit "type" convention layered on top of the schema.
+
+### D.7.1 HITL Queue Lifecycle (`hitl_queue` vs `hitl_log`)
+
+Two layers serve different purposes; **Postgres `hitl_log` is the durable source of truth** across process restarts.
+
+| Layer | Location | Purpose | Lifecycle |
+|---|---|---|---|
+| **`hitl_log`** | Postgres (§R) | Durable audit + UI query source | Row created on `interrupt()`; updated on response/timeout |
+| **`SDLCState.hitl_queue`** | In-graph working set | Pending requests visible to the running graph | Appended on interrupt; entry removed on resume |
+| **`SDLCState.hitl_history`** | In-graph append-only log | Completed HITL for this task session | Appended on resume with full `HITLRequest` including response |
+
+**On `interrupt()` (any HITL type):**
+1. Build `HITLRequest` with `request_type` set explicitly (never implicit).
+2. Insert row into `hitl_log` (`request_type`, `phase`, `reason`, `evidence_ref`, `options`, `timeout_at`; `responded_at` NULL).
+3. Append the same request to `SDLCState.hitl_queue`.
+4. Call LangGraph `interrupt()` with the request payload.
+
+**On resume (`Command(resume=...)`):**
+1. Update `hitl_log` row: `response`, `responded_by`, `responded_at`.
+2. Remove matching entry from `SDLCState.hitl_queue`.
+3. Append completed request to `SDLCState.hitl_history` (`append_only`).
+4. Route based on decision (ApprovalGate template, Requirements Analyst, etc.).
+
+**On timeout (Fail-Closed):** scheduled job checks `hitl_log.timeout_at`; on expiry, escalate (hold/notify) — never auto-approve. Update `hitl_log` with escalation status; clear from `hitl_queue`; do not append to `hitl_history` as approved.
+
+**UI/API reads:** `list_pending_hitl()` queries `hitl_log WHERE responded_at IS NULL` — not `SDLCState.hitl_queue` — so pending items survive worker restarts.
 
 ## D.8 Feedback Reports vs. Clarification Escalations (Structured, Never Bare)
 
@@ -681,7 +822,7 @@ Agents receive structured findings, not bare retry signals. `ClarificationEscala
 
 ### D.9.1 The Communication Invariant
 
-**Workers never communicate directly with other workers. Peer-to-peer agent messaging is architecturally forbidden — not merely undocumented.** This is a project-wide rule, not a per-phase convention, and it is what makes every mechanism in this section (and in §E) safe to reason about, checkpoint, and audit.
+**Workers never communicate directly with other workers. Peer-to-peer agent messaging is architecturally forbidden — not merely undocumented.** This is Principle 9 (§A.2) made operational: parallel workers remain intentionally unaware of siblings; cross-branch knowledge is assembled only at Fan-in.
 
 All coordination between concurrently-running units of work happens exclusively through one of:
 
@@ -704,7 +845,7 @@ Every parallel worker (currently: CodeGen sub-agents, §E.8; any future `Send`-d
 |---|---|
 | **Producer** | The worker itself, as part of its normal completion output |
 | **Consumer** | Fan-in Coordinator (§D.4.1); Implementation Manager on replan (via `ReplanContext`) |
-| **Lifecycle** | One WCP per worker per dispatch; appended to `SDLCState.worker_coordination_packets` (`append_only`); superseded (not deleted) on redispatch |
+| **Lifecycle** | One WCP per worker per dispatch; appended to `SDLCState.worker_coordination_packets` (`append_only`); superseded (not deleted) on redispatch — Fan-in considers only the highest `attempt_number` WCP per `subtask_id` (§D.4.1 step 1) |
 | **Storage** | Small structured fields inline in `SDLCState`; `artifact_refs` field points to the Blackboard for the actual diff/logs |
 | **Validation** | Schema-validated the same way any agent output is (MASC Check 1, §E.6) — a malformed WCP is treated as `needs_manager_attention=true` (Fail-Closed), never silently dropped |
 | **Token cost** | Designed to be produced as structured-output fields of the *same* model call that produces the worker's diff — not a second LLM round-trip. A worker only needs a second call if its first output's WCP fields are incomplete, which MASC's schema check catches |
@@ -767,9 +908,17 @@ class BlackboardService(Protocol):
 
 A content-addressed or task-scoped Postgres JSONB/table-backed implementation is sufficient at this scale; dedicated object storage is a future-scale concern (see §G.4's federation discussion for the analogous "don't pre-split for scale you don't have yet" reasoning), not something to build ahead of need.
 
-**No separate `BlackboardArtifactRef` wrapper type is introduced.** Every pointer in this document is already a plain `str` field (`evidence_ref`, `artifact_refs`, `artifact_ref`) that `BlackboardService.retrieve()` accepts directly. A typed wrapper class would add an object without adding capability — rejected under the "avoid unnecessary objects" constraint.
+**No separate `BlackboardArtifactRef` wrapper type is introduced.** Every pointer in this document is already a plain `str` field (`evidence_ref`, `artifact_refs`, `artifact_ref`) that `BlackboardService.retrieve()` accepts directly. Format: `{task_id}/{kind}/{uuid}` (§D.4.3). A typed wrapper class would add an object without adding capability — rejected under the "avoid unnecessary objects" constraint.
 
-### D.9.5 Manager Authority (Who May Spawn, Reassign, Replan)
+**Failure contracts (Fail-Closed):**
+
+| Failure | Behavior |
+|---|---|
+| `store()` fails | Worker branch → `ClarificationEscalation(category="missing_context")`, `blocked=true`, stop — never proceed without persisted artifact |
+| `retrieve()` fails / ref missing | Treat as missing artifact → same escalation path; Manager/Fan-in may retry retrieve once, then escalate |
+| `exists()` returns false for required ref | Fail-Closed — do not substitute empty content |
+
+## D.9.5 Manager Authority (Who May Spawn, Reassign, Replan)
 
 Explicit, project-wide, not per-phase:
 
@@ -814,21 +963,36 @@ The following are explicitly out of scope for this architecture. Naming them her
 Created (Send dispatch from Manager)
    │
    ▼
-Running (progressive RI context, sandboxed diff generation)
+Running (progressive RI context, sandboxed diff generation in isolated worktree, §D.4.3)
    │
-   ├──▶ Completed ──▶ emits WorkerCoordinationPacket (blocked=false) ──▶ Fan-in
+   ├──▶ Diff produced ──▶ Validator(implementation) [per-branch, tool-only, §D.4.0]
+   │         │
+   │         ├──▶ pass ──▶ ImplementationResult(status="validated") + WCP ──▶ eligible for Fan-in
+   │         │
+   │         └──▶ fail ──▶ FL-04 → FeedbackReport → retry CodeGen (attempt_number++)
+   │                        └─ 3× fail → Feedback Agent → HITL
    │
-   ├──▶ Blocked ──▶ emits ClarificationEscalation + WCP(blocked=true) ──▶ stops branch
+   ├──▶ Blocked (mid-work) ──▶ ClarificationEscalation + WCP(blocked=true) + ImplementationResult(status="blocked") ──▶ Fan-in batch
    │                    │
    │                    ▼
    │              Manager resolves (RI/design) or HITL ──▶ Redispatch ──▶ Running (new attempt)
    │
-   ├──▶ Cancelled (task-level cancellation, §D.9.9) ──▶ worktree/branch cleanup, no WCP required
+   ├──▶ Cancelled (task-level cancellation, §D.9.9) ──▶ worktree/branch cleanup, no merge
    │
-   └──▶ Failed (retries exhausted at this attempt) ──▶ FL-04 → Feedback Agent path (§D.5, §D.8)
+   └──▶ Failed (unrecoverable) ──▶ ImplementationResult(status="failed")
 ```
 
 A worker's branch is always in exactly one of these states; there is no "waiting on another worker" state, by construction (§D.9.1).
+
+**Idempotent worker contract (production requirement).** Every implementation worker (CodeGen sub-agent and any future `Send`-dispatched worker) must safely tolerate retries, interrupt/resume, checkpoint recovery, and duplicate execution requests without performing duplicate side effects. This is implementation-agnostic — the contract is behavioral, not a specific storage mechanism:
+
+- **Subtask identity:** every execution is keyed to `(task_id, subtask_id, attempt_number)`. The worker checks whether this subtask already has a completed result in `SDLCState`/`Blackboard` before repeating sandbox writes or git mutations.
+- **Completed work detection:** if a prior attempt for the same `subtask_id` already produced a valid diff + WCP, the worker returns that result rather than regenerating — unless the Manager explicitly redispatched with revised instructions (new attempt).
+- **Safe retries:** a retried node re-executes only the failed step; it does not append duplicate artifacts, duplicate git commits, or duplicate WCP entries for the same successful partial work.
+- **Checkpoint recovery:** after process crash and resume, LangGraph may replay from the last checkpoint. The worker must not assume it is the first execution — it must consult existing branch state (worktree, blackboard refs) before acting.
+- **Same final result:** duplicate execution of an idempotent worker for the same inputs must converge to the same observable outcome (same diff content or same blocked/escalation signal), not fork the task into inconsistent parallel realities.
+
+Violating idempotency breaks fan-in correctness, cost accounting, and audit trails — treat it as a P0 implementation bug, not an optimization.
 
 ### D.9.9 Cancellation & Cleanup
 
@@ -1144,12 +1308,14 @@ class IntentTracker:
 
 | Agent                       | Responsibility                                                          | Input → Output                                                | Model Tier                                         | Tools                                                                                   | Exit / Failure                                                                                           |
 | --------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| **Implementation Manager**  | Decomposes design into tasks; dependency-aware execution ordering       | Approved design → TaskDecomposition                           | High-capability                                    | `get_dependencies`, `get_dependents`                                                    | Exit: no circular deps; all components covered. Failure: overlapping ownership → resolve before dispatch |
+| **Implementation Manager**  | Decomposes design into tasks; dependency-aware execution ordering; pre-dispatch overlap check (§D.4.2) before `Send` | Approved design → TaskDecomposition                           | High-capability                                    | `get_dependencies`, `get_dependents`                                                    | Exit: no circular deps; all components covered; no obvious file overlap in same parallel group. Failure: overlapping ownership → resolve before dispatch |
 | **CodeGen Sub-agent (×N)**  | Implements one module/scope per instance (parallel via Send API); emits `WorkerCoordinationPacket` on exit (§D.9.2), or `ClarificationEscalation` + stops (§D.9.3) if blocked | Module spec + progressive context → diff + WCP                | Fast (simple) / High-capability (complex refactor) | `get_symbol_signature`, `get_symbol_body`, `get_callers`, `get_file_structure`, sandbox | Exit: diff + WCP produced; self-check clean. Failure 3×: Feedback Agent. Never contacts another CodeGen instance directly (§D.9.1) |
 | **Fan-in Coordinator**      | Deterministic (not an agent, not an LLM call) — overlap + WCP semantic-conflict detection, merge/serialize decision, replan trigger (§D.4.1) | All branch diffs + WCPs → merge-eligible set or serialize/replan instruction | — (no model call) | File-set/diff analysis, `WorkerCoordinationPacket` fields | Exit: clean merge or all conflicts serialized/replanned. Never silently auto-merges |
-| `Validator`(implementation) | Static validation: lint/type/security (independent of CodeGen)          | Diff → pass/fail + findings                                   | None (tools only)                                  | ruff, mypy, Semgrep                                                                     | Failure: FeedbackReport to CodeGen sub-agent; 3× max                                                     |
+| `Validator`(implementation) | Static validation: lint/type/security (independent of CodeGen); **runs per branch before Fan-in** (§D.4.0) | Branch diff → pass/fail + findings                                   | None (tools only)                                  | ruff, mypy, Semgrep                                                                     | Failure: FeedbackReport to CodeGen sub-agent (FL-04); 3× max                                                     |
 | **Feedback Agent**          | Synthesizes root cause of repeated failure; proposes different approach | `ReplanContext` (failure history, WCPs, episodic memory) → revised task instructions | High-capability                                    | Episodic memory                                                                         | Trigger: N consecutive failures on same module. Failure: HITL escalation                                 |
 | **Integration Validator**   | Verifies new code integrates correctly; catches interface mismatches    | All merged diffs + interface contracts → pass/fail            | High-capability                                    | `get_callers`, `get_callees`, sandbox integration tests                                 | Failure: FeedbackReport to Implementation Manager                                                        |
+
+**Note:** `Integration Validator` is a `BaseAgent` with tool calls (RI + sandbox tests), **not** a `Validator` template instance. It runs on the **merged** diff set after Fan-in. `Validator(implementation)` is a `Validator` template instance that runs **per branch before Fan-in** (§D.4.0).
 
 
 
@@ -1177,7 +1343,6 @@ class IntentTracker:
 | Agent                       | Responsibility                                                                   | Input → Output                                         | Model Tier      | Tools                                      | Exit / Failure                                                              |
 | --------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------ | --------------- | ------------------------------------------ | --------------------------------------------------------------------------- |
 | **Review Manager**          | Coordinates diff review against design + standards                               | Diff + design + QA evidence → review outcome           | High-capability | Repo Intelligence, style/standards checker | Exit: approved for release. Failure: changes-requested → implementation     |
-| **Merge Conflict Resolver** | Handles overlapping-branch conflicts from fan-in                                 | Conflicting diffs → resolved diff or serialized re-run | Fast            | Diff/merge tools                           | Exit: resolved or re-run scheduled. Failure: HITL escalation                |
 | `ApprovalGate`(pr)          | Standard PR review; mandatory for Medium+ risk                                   | PR + evidence bundle                                   | —               | Git provider MCP                           | Failure: changes-requested → implementation                                 |
 | **Release Manager**         | Coordinates deployment via existing CI/CD                                        | Merged PR → deployment plan + strategy selection       | High-capability | CI/CD adapter (never direct cloud API)     | Exit: deployed. Failure: automated rollback trigger                         |
 | **Rollback Sub-agent**      | Executes rollback plan on deployment failure or incident                         | Deployment + rollback plan → reverted state            | Fast            | CI/CD adapter                              | Failure: IMMEDIATE human escalation                                         |
@@ -1197,16 +1362,37 @@ class IntentTracker:
 
 Computed once at intake, attached to Task, consumed by every downstream node.
 
-```yaml
-WorkflowProfile:
-  agent_set: [...]                     # which specialist/validator agents are active
-  execution_order: sequential | parallel_where_independent
-  qa_depth: minimal | standard | deep | exhaustive
-  model_tier: fast_cheap | balanced | frontier
-  approval_requirements: [checkpoint...]
-  max_parallelism: int                 # capped by repo_scale (§F.4)
-  cost_budget_usd: float               # derived from risk tier and work type
+```python
+from pydantic import BaseModel
+from typing import Literal
+
+Checkpoint = Literal["scope", "design", "security", "release", "pr", "deployment"]
+
+class WorkflowProfile(BaseModel):
+    agent_set: list[str]              # which specialist/validator agents are active
+    execution_order: Literal["sequential", "parallel_where_independent"]
+    qa_depth: Literal["minimal", "standard", "deep", "exhaustive"]
+    model_tier: Literal["fast_cheap", "balanced", "frontier"]
+    approval_requirements: list[Checkpoint]
+    max_parallelism: int              # capped by repo_scale (§F.2)
+    cost_budget_usd: float            # derived from risk tier and work type
+
+    @classmethod
+    def most_conservative(cls) -> "WorkflowProfile":
+        """Fail-Closed default (Principle 8). Used by Phases 05–09 until Phase 10
+        replaces hardcoded call sites with resolve_workflow_profile()."""
+        return cls(
+            agent_set=["all"],        # every agent active — no shortcuts
+            execution_order="parallel_where_independent",
+            qa_depth="standard",
+            model_tier="balanced",
+            approval_requirements=["scope", "design", "release", "pr", "deployment"],
+            max_parallelism=2,
+            cost_budget_usd=20.0,
+        )
 ```
+
+**Phases 05–09 binding rule:** every `ApprovalGate.applies_when`, QA depth setting, and model tier assignment MUST behave as if `WorkflowProfile.most_conservative()` were resolved — do not hand-code shortcut paths in individual agents. Phase 10 replaces these hardcoded defaults with `resolve_workflow_profile()` call sites.
 
 
 
@@ -1445,6 +1631,53 @@ class RepositoryIntelligence:
     async def get_design_decisions(self, modules: list[str]) -> list[ADR]: ...
     async def get_change_frequency(self, file_path: str, days: int = 90) -> float: ...
 ```
+
+### G.6.1 Supporting Types (Canonical Minimal Models)
+
+```python
+from pydantic import BaseModel
+
+class Symbol(BaseModel):
+    id: str              # symbol_id: "{file_path}::{qualified_name}"
+    kind: str            # function | class | method | module | ...
+    name: str
+    file_path: str
+    start_line: int
+    end_line: int
+    signature: str | None = None
+    docstring: str | None = None
+
+class CodeChunk(BaseModel):
+    symbol_id: str | None
+    file_path: str
+    chunk_text: str
+    content_hash: str
+    start_line: int
+    end_line: int
+
+class ImpactSet(BaseModel):
+    changed_files: list[str]
+    affected_files: list[str]       # dependents within configured BFS depth
+    affected_symbols: list[str]     # symbol_ids
+    depth: int
+
+class ContextBundle(BaseModel):
+    chunks: list[CodeChunk]
+    total_tokens: int
+    truncated: bool                 # True if max_tokens forced early stop
+```
+
+### G.6.2 Repository Intelligence Failure Contracts (Fail-Closed)
+
+| Failure | Caller context | Behavior |
+|---|---|---|
+| RI timeout / unavailable | Worker mid-task | `ClarificationEscalation(ri_consulted=true)` with empty evidence; worker stops (`blocked=true`) |
+| RI timeout / unavailable | Fan-in semantic cross-check (§D.4.1.1 step 4) | Treat as conflict → serialize-and-rerun or Manager replan |
+| RI timeout / unavailable | Confidence Scorer / MASC | Treat confidence as below floor → block / escalate (§B.4) |
+| RI returns empty for required query | Worker | Escalate via ClarificationEscalation — never guess |
+| Malformed RI response | Any | Fail-Closed → escalate; log `ValidationFlag(source="tool_error")` |
+
+Agents never query the graph DB or vector store directly — all failures surface through the `RepositoryIntelligence` interface above.
 
 
 
@@ -1996,7 +2229,7 @@ The reflection output is appended to the draft before it enters `Validator`(desi
 | **1. New Task**                | Intake form (free text + optional structured fields)                                                                                       | — (write path only)                            |
 | **2. Requirement Interview**   | Current question from Questioning Engine (§E.4), **plus questions auto-answered from repo with their retrieved answers shown**             | RequirementsSpec, RI responses                 |
 | **3. Workflow Overview**       | WorkflowProfile in plain language — risk tier, methodology, active agents, and *which §F.3 rule fired*                                     | Task, WorkflowProfile                          |
-| **4. SDLC Phase View**         | Current position in the state machine (§D.3); backward edges shown as visually distinct loops                                              | SDLCState.state                                |
+| **4. SDLC Phase View**         | Current position in the state machine (§D.3); backward edges shown as visually distinct loops                                              | `Task.state` + `agent_events` phase transitions (§D.2.1) |
 | **5. Active Agents**           | Which agents are running now and their current tool call                                                                                   | OTel trace stream                              |
 | **6. Live Execution Timeline** | Phase transitions, feedback loops triggered, approvals — chronological                                                                     | agent_events channel                           |
 | **7. Questions Queue**         | Open questions across a human's in-flight tasks, with already-gathered context shown                                                       | hitl_queue where request_type="clarification"  |
@@ -2030,7 +2263,17 @@ class AgentEvent(TypedDict):
     payload: dict
 ```
 
-`AgentEvent` remains purely observational — a projection of already-happened state changes for the UI/OTel trace stream (§D.9's `messages` clarification applies equally here: this channel is never read back by agents to make decisions, only written for humans/dashboards to read).
+`AgentEvent` is **strictly observational** — a projection of already-committed state changes for the UI, OTel trace stream, and audit logs. It exists only for logging, tracing, metrics, debugging, and auditability.
+
+**Hard rule:** no graph node, Manager, Fan-in Coordinator, Validator, or policy function may read `AgentEvent` or `SDLCState.agent_events` to decide routing, scheduling, planning, or replanning. Events are write-only from the orchestration layer's perspective. Control-flow inputs are exclusively:
+
+- `SDLCState` typed channels (`requirements`, `task_decomposition`, `worker_coordination_packets`, `clarification_escalations`, `feedback_reports`, etc.)
+- Validator / MASC outputs
+- Repository Intelligence tool results
+- Workflow Policy Engine (`resolve_workflow_profile`, `escalate_model_tier`)
+- Manager decisions over the above
+
+This is the same discipline as §D.9.1's rule for `messages` — observability channels must never become control channels.
 
 ---
 
@@ -2049,17 +2292,17 @@ sdlc-platform/
 │   │
 │   ├── orchestration/            # LangGraph graphs, nodes, state schemas
 │   │   ├── state.py              # SDLCState TypedDict + all reducers
-│   │   ├── dag_constructor.py    # WorkflowContext → graph topology
+│   │   ├── dag_constructor.py    # Single orchestrator StateGraph; WorkflowProfile flags drive conditional edges (§D.2)
 │   │   ├── feedback.py           # FeedbackReport schema + loop registry
 │   │   ├── masc.py               # MASCEngine (3-check pipeline)
 │   │   ├── intent_tracker.py     # IntentTracker
 │   │   ├── checkpointers/
 │   │   │   └── postgres.py       # AsyncPostgresSaver + thread_id[:255]
-│   │   └── workflows/
-│   │       ├── agile.py
-│   │       ├── waterfall.py
-│   │       ├── hybrid.py
-│   │       └── emergency.py      # Hotfix fast path
+│   │   └── workflow_profiles/    # WorkflowProfile preset configs — NOT separate LangGraph graphs (§D.2)
+│   │       ├── conservative.py   # mirrors WorkflowProfile.most_conservative()
+│   │       ├── standard.py
+│   │       ├── hotfix.py         # hotfix fast-path flags
+│   │       └── enterprise.py
 │   │
 │   ├── agents/
 │   │   ├── base.py               # BaseAgent (retry, MASC integration, OTel)
@@ -2243,6 +2486,8 @@ CREATE TABLE approvals (
 CREATE TABLE hitl_log (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     task_id         VARCHAR(255) REFERENCES tasks(id),
+    request_type    VARCHAR(50) NOT NULL DEFAULT 'approval'
+                    CHECK (request_type IN ('clarification', 'approval', 'policy_review', 'risk_approval')),
     phase           VARCHAR(100),
     reason          TEXT,
     evidence_ref    TEXT,
@@ -2321,6 +2566,7 @@ CREATE TABLE feedback_loop_events (
 CREATE INDEX idx_tasks_state        ON tasks(state);
 CREATE INDEX idx_tasks_risk_tier    ON tasks(risk_tier);
 CREATE INDEX idx_cost_task_id       ON cost_tracking(task_id);
+CREATE INDEX idx_hitl_request_type  ON hitl_log(request_type) WHERE responded_at IS NULL;
 CREATE INDEX idx_regression_module  ON regression_history(module_path);
 CREATE INDEX idx_design_modules     ON design_decisions USING GIN(module_paths);
 CREATE INDEX idx_feedback_task      ON feedback_loop_events(task_id, loop_id);

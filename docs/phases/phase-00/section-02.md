@@ -21,9 +21,9 @@ Section 01 (Task model shape determines the `tasks` table columns).
 1. Write `docker-compose.yml` with a `postgres:16` service, mounting an init script that runs `CREATE EXTENSION IF NOT EXISTS vector;`, and a `redis:7.2` service.
 2. Implement `packages/common/config.py` — a Pydantic `Settings` class reading `DATABASE_URL`, `REDIS_URL`, `ENVIRONMENT` from `.env` via `pydantic-settings`.
 3. Implement SQLAlchemy async engine/session setup in `packages/common/db.py`.
-4. Define SQLAlchemy models for `tasks` and `cost_tracking` per §R's column definitions; scaffold (but don't populate) `approvals` and `hitl_log` table models.
+4. Define SQLAlchemy models for `tasks` and `cost_tracking` per §R's column definitions; scaffold (but don't populate) `approvals` and `hitl_log` table models — **`hitl_log` must include `request_type`** per §R (CHECK constraint on the four HITL discriminant values).
 5. Generate the initial Alembic revision (`alembic revision --autogenerate`) and verify the generated SQL matches §R's `CREATE TABLE` statements column-for-column.
-6. Add the indexes from §R (`idx_tasks_state`, `idx_tasks_risk_tier`, `idx_cost_task_id`) to the same migration.
+6. Add the indexes from §R (`idx_tasks_state`, `idx_tasks_risk_tier`, `idx_cost_task_id`, `idx_hitl_request_type`) to the same migration.
 7. Write an integration test (using a real Postgres via `docker-compose` or testcontainers) that runs migrations up, inserts a `Task`, reads it back via `task_repository.get_task`.
 
 ## Manual Testing Procedure
@@ -41,7 +41,7 @@ A terminal recording: `docker-compose up -d`, `alembic upgrade head`, then a scr
 
 - [ ] `alembic upgrade head` runs cleanly from an empty database.
 - [ ] `alembic downgrade base` also runs cleanly (migrations are reversible) — verified explicitly, not assumed.
-- [ ] All table/column/index definitions match §R.
+- [ ] All table/column/index definitions match §R (including `hitl_log.request_type` and `idx_hitl_request_type`).
 - [ ] `pgvector` extension is enabled and verifiable via `SELECT * FROM pg_extension;`, even though no vector column exists yet.
 - [ ] No code outside `packages/common/config.py` reads `os.environ` directly (grep-verifiable).
 

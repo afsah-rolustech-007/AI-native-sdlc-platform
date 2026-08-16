@@ -31,22 +31,21 @@ Approved RequirementsSpec
         │
         ▼
   Implementation Manager ── decomposes into TaskDecomposition
-        │
+        │                 pre-dispatch overlap check (§D.4.2, deterministic, before Send)
         ▼
   [Send API fan-out] ──▶ CodeGen Sub-agent × N (parallel, per module/scope, isolated worktrees)
         │                       │
-        │                 each emits WorkerCoordinationPacket on exit (§D.9.2);
-        │                 blocked branch instead emits ClarificationEscalation (§D.9.3) and stops
+        │                 each branch: diff + WCP (§D.9.2)
         │                       │
-        │                 3x fail ──▶ Feedback Agent (w/ ReplanContext, §D.5) ──▶ still fails ──▶ HITL
+        │                 Validator(implementation) [per-branch, tool-only, §D.4.0]
+        │                       │
+        │                 fail ──▶ FL-04 (CodeGen, 3x) ──▶ Feedback Agent ──▶ HITL
+        │                 blocked branch ──▶ ClarificationEscalation (§D.9.3) and stops
         ▼
   Fan-in Coordinator (deterministic, §D.4.1) — file overlap + WCP semantic-conflict
-  detection ──▶ overlapping/conflicting? serialize + re-run
+  detection ──▶ overlapping/conflicting? serialize + re-run (§D.4.4)
         │        any needs_manager_attention / open escalations? ──▶ batched Manager
         │        replan (≤1 per group per attempt, §D.9.6) ──▶ redispatch
-        ▼
-  Validator(implementation) [lint/type/security, no LLM] ──fail──▶ FL-04 (CodeGen, 3x)
-        │
         ▼
   Integration Validator ──fail──▶ FL-05 (Implementation Manager, re-assign, 2x)
         │
@@ -54,7 +53,7 @@ Approved RequirementsSpec
   [QA phase — still a stub until Phase 07]
 ```
 
-**Communication invariant (§D.9.1), binding from this phase onward:** CodeGen sub-agents never communicate with each other, directly or indirectly. All coordination flows through the Implementation Manager, the Fan-in Coordinator, `SDLCState`, the Blackboard, or Repository Intelligence. This phase is where that invariant first has something to actually violate (parallel workers exist), so it is enforced here as real graph topology (no worker node has an edge to another worker node), not just documentation.
+**Communication invariant (§D.9.1 / Principle 9, §A.2), binding from this phase onward:** CodeGen sub-agents never communicate with each other, directly or indirectly. Workers remain intentionally unaware of siblings; cross-branch knowledge is assembled only at Fan-in. All coordination flows through the Implementation Manager, the Fan-in Coordinator, `SDLCState`, the Blackboard, or Repository Intelligence. Workers must also be idempotent (§D.9.8) — safe under retry, resume, and checkpoint replay.
 
 ## Expected Live Demo
 

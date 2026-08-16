@@ -30,7 +30,7 @@ Task ──▶ Orchestrator StateGraph (per task, thread_id = task.id[:255])
           AsyncPostgresSaver (checkpoint after every node)
 ```
 
-Every node is a placeholder that just advances `SDLCState.task_state` — no LLM, no real logic. The point of this phase is proving the *mechanism*, not the *content*.
+Every node is a placeholder that updates `Task.state` via `update_task_state()` on node entry (§D.2.1) — no LLM, no real logic. The point of this phase is proving the *mechanism*, not the *content*.
 
 ## Expected Live Demo
 

@@ -139,9 +139,11 @@ User/Ticket ──▶ Intake Subgraph ──▶ Requirements Subgraph ──▶ 
                                                                     │
                                                                     ▼
                                                           Implementation Subgraph
-                                                          (parallel CodeGen via Send API,
+                                                          (Send → CodeGen × N, each branch:
+                                                           CodeGen → Validator(implementation);
                                                            Fan-in Coordinator: deterministic
-                                                           overlap + WCP conflict check)
+                                                           overlap + WCP conflict check;
+                                                           Integration Validator on merged diff)
                                                                     │
                                                                     ▼
                                                               QA Subgraph
@@ -174,7 +176,7 @@ This is the single most important architectural decision to internalize before w
 
 ### 4.2 Why the Workflow Policy Engine Is Deliberately Late
 
-`resolve_workflow_profile()` (§F.3) is a pure, ordered, unit-testable rule function — but it can only be *validated* against real behavior once real agents exist across enough of the SDLC to observe how risk tier, confidence, and work type actually correlate with good outcomes. Building it early would mean guessing at rules with no data to check them against. The architecture handles this by using `WorkflowProfile.most_conservative()` (the fail-closed default, Principle 8) everywhere until Phase 10 — every phase before that runs the standard/conservative path, not a shortcut path. This is why Phase 10 depends on Phases 5–9: it is a formalization and testing of routing logic that was implicitly "everything conservative" until then.
+`resolve_workflow_profile()` (§F.3) is a pure, ordered, unit-testable rule function — but it can only be *validated* against real behavior once real agents exist across enough of the SDLC to observe how risk tier, confidence, and work type actually correlate with good outcomes. Building it early would mean guessing at rules with no data to check them against. The architecture handles this by using `WorkflowProfile.most_conservative()` (§F.1 — explicit field values, not an informal convention) everywhere until Phase 10 — every phase before that runs the standard/conservative path, not a shortcut path. This is why Phase 10 depends on Phases 5–9: it is a formalization and testing of routing logic that was implicitly "everything conservative" until then.
 
 ---
 
@@ -191,13 +193,20 @@ Full detail in §E of the blueprint; summarized here for orientation.
 
 ### 5.1 Communication Architecture Summary
 
-Full detail in §D.9 of the blueprint. One invariant governs everything else in this subsection: **workers never talk to workers.** All coordination between concurrently-dispatched units of work is mediated — by the Phase Manager, the Fan-in Coordinator, `SDLCState`, the Blackboard, Repository Intelligence, or HITL — never peer-to-peer.
+Full detail in §D.9 of the blueprint. One invariant governs everything else in this subsection: **workers never talk to workers** (Principle 9, §A.2). Parallel workers remain intentionally unaware of siblings; cross-branch knowledge is assembled only at Fan-in — improving determinism, auditability, reproducibility, and deadlock avoidance.
 
 - **Worker Coordination Packet (WCP, §B.2/§D.9.2)** — every parallel worker emits one structured self-report (assumptions, discovered dependencies, interface changes, confidence) on branch exit, produced as part of its normal output rather than a second LLM call. This is what the Fan-in Coordinator uses to catch assumption drift that a raw diff wouldn't surface.
-- **Fan-in Coordinator (§D.4.1)** — a deterministic graph node, *not* an agent or LLM call. Detects file-level and WCP-based semantic overlap, decides merge vs. serialize-and-rerun, and is the only thing authorized to trigger a bounded (≤1 per group per attempt) Manager replan.
+- **Fan-in Coordinator (§D.4.1)** — a deterministic graph node, *not* an agent or LLM call. Runs after all branches pass per-branch `Validator(implementation)`. Detects file-level and WCP-based semantic overlap (§D.4.1.1), decides merge vs. serialize-and-rerun (§D.4.4), and is the only thing authorized to trigger a bounded (≤1 per group per attempt) Manager replan.
+- **`Validator(implementation)` (§D.4.0)** — runs per Send branch before Fan-in; tool-only static analysis. Failures route via FL-04 to the originating CodeGen sub-agent.
 - **ClarificationEscalation protocol (§D.9.3)** — when a worker's assumptions break mid-task, it consults Repository Intelligence first, then stops its own branch and escalates (never guesses, never messages a peer). The Manager resolves the batch from design docs + RI; HITL is reached only for genuine requirement/scope/policy ambiguity.
 - **ReplanContext (§B.2/§D.5)** — every replan (Feedback Agent, Fan-in-triggered, or otherwise) is handed structured history of prior attempts, so each attempt is strictly better-informed, never a blind re-run.
-- **Explicitly rejected (§D.9.7):** worker↔worker messaging, swarm/debate/voting for core workflow, always-on coordination windows, recursive worker spawning, and an LLM-driven Merge Resolution Agent — merge conflicts are resolved deterministically (serialize-and-rerun), never by asking a model to reconcile two diffs.
+- **Explicitly rejected (§D.9.7):** worker↔worker messaging, swarm/debate/voting for core workflow, always-on coordination windows, recursive worker spawning, and an LLM-driven Merge Resolution Agent — merge conflicts are resolved deterministically by the Fan-in Coordinator (serialize-and-rerun), never by a separate merge agent or model call.
+- **Idempotent workers (§D.9.8):** every parallel worker must tolerate retries, checkpoint replay, and resume without duplicate side effects.
+- **Pre-dispatch overlap check (§D.4.2):** Implementation Manager may adjust decomposition before `Send()` when RI reveals obvious file overlap — Fan-in remains final authority.
+- **`AgentEvent` observational only (§B.8, §P):** never used for routing, scheduling, planning, or replanning.
+- **Task ↔ graph sync (§D.2.1):** `Task.state` in Postgres is the durable phase source of truth; updated on graph node entry. `SDLCState` does not carry `task_state`.
+- **HITL lifecycle (§D.7.1):** `hitl_log` (Postgres) is durable; `SDLCState.hitl_queue` is in-graph pending set; UI queries `hitl_log WHERE responded_at IS NULL`.
+- **Git isolation (§D.4.3):** one worktree per `(task_id, subtask_id)`; Fan-in merges into integration worktree only.
 
 ---
 
@@ -223,6 +232,8 @@ Three axioms carried through every part of the system, restated here because the
 1. **Fail-Closed by Default (Principle 8, §A.2).** Any scoring/policy/validation mechanism that errors, times out, or returns malformed output routes toward *more* human oversight, never more autonomy. This is why confidence-scorer failures don't default to "assume fine" — they default to "block."
 2. **Irreversible actions always require human approval regardless of confidence (Principle 4).** Confidence tunes *speed of routing*, never *whether* a production deploy needs a human.
 3. **Deterministic and auditable over clever (Principle 5).** Rule tables and named tools beat learned/black-box equivalents wherever both are viable — this is why routing is an ordered `if/elif` function (§F.3), not a trained classifier.
+4. **Intentional worker isolation (Principle 9, §A.2).** Parallel workers are deliberately unaware of sibling workers; cross-worker knowledge is delayed until Fan-in. This preserves determinism, auditability, reproducibility, and deadlock-free parallelism — not merely a messaging restriction.
+5. **`AgentEvent` is observational only (§B.8, §P).** Routing, scheduling, planning, and replanning never read the event stream; control flow uses `SDLCState` typed channels, Validators, RI, and the Workflow Policy Engine only.
 
 ---
 

@@ -61,7 +61,7 @@ It would be tempting to build Repo Intelligence at Scale (11) or Advanced QA (13
 
 ### 2.4 Fail-Closed Defaults Before Phase 10
 
-Phases 05–09 run real agents through real phases, but **before Phase 10 exists, every task uses the conservative default profile** (`WorkflowProfile.most_conservative()`, §F.3) — meaning every checkpoint requires approval and QA runs at standard depth regardless of computed risk/confidence. This is intentional, not a stopgap to feel bad about: it is the fail-closed principle (Principle 8) applied to the *build process itself*. Do not attempt to hand-code shortcut paths ("skip approval if risk is obviously low") into individual agents during Phases 05–09 — that logic belongs exclusively in `workflow_engine/policy.py`, built once, correctly, in Phase 10.
+Phases 05–09 run real agents through real phases, but **before Phase 10 exists, every task uses the conservative default profile** (`WorkflowProfile.most_conservative()`, §F.1 — explicit values: all agents active, `qa_depth=standard`, all checkpoints including scope/design/release/pr/deployment, `max_parallelism=2`, `cost_budget_usd=20.0`) — meaning every checkpoint requires approval and QA runs at standard depth regardless of computed risk/confidence. This is intentional, not a stopgap to feel bad about: it is the fail-closed principle (Principle 8) applied to the *build process itself*. Do not attempt to hand-code shortcut paths ("skip approval if risk is obviously low") into individual agents during Phases 05–09 — that logic belongs exclusively in `workflow_engine/policy.py`, built once, correctly, in Phase 10.
 
 ---
 

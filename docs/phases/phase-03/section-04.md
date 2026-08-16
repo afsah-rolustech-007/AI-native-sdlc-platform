@@ -21,8 +21,8 @@ Section 01 (symbol-bounded chunking), Phase 02 (`embed()` method).
 1. Define the `code_embeddings` table/migration (`symbol_id`, `file_path`, `chunk_text`, `embedding vector(N)`, `content_hash`) — `content_hash` exists from day one to support the staleness-detection pattern used later (§G.5).
 2. Implement chunking: one chunk per symbol (function/class/method) from Section 01's index, using the signature+docstring+body as the embedded text (full body at MVP; compression/skeletal-vs-full distinction is Phase 12's concern).
 3. Implement the embedding pipeline: batch-call `ModelAdapter.embed()`, store vectors with `content_hash` for later change detection.
-4. Implement `search_concepts(query, top_k) -> list[CodeChunk]` — embed the query, cosine-similarity search via pgvector's `<=>` operator.
-5. Implement `find_similar_implementations(code, top_k) -> list[CodeChunk]` — same mechanism, code snippet as query instead of natural language.
+4. Implement `search_concepts(query, top_k) -> list[CodeChunk]` (§G.6.1) — embed the query, cosine-similarity search via pgvector's `<=>` operator.
+5. Implement `find_similar_implementations(code, top_k) -> list[CodeChunk]` (§G.6.1) — same mechanism, code snippet as query instead of natural language.
 6. Unit/integration tests: known-similar code snippets rank near each other; a semantically unrelated query returns low-similarity results (sanity check against a fixture repo with clearly distinct modules).
 
 ## Manual Testing Procedure

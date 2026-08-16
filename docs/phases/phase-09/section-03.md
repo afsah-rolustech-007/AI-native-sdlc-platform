@@ -10,7 +10,7 @@ These screens make the platform's *decisions* legible, not just its outputs — 
 
 ## Expected Architecture
 
-Screen 3 reads `Task.workflow_profile_id` and (currently) the fail-closed default profile's fixed contents, rendering "why" as "conservative default — real rule-based routing lands in a later phase" until Phase 10 exists, then automatically becomes accurate once Phase 10 populates real rule-firing metadata. Screen 4 reads `SDLCState.state`/`TaskState` history (derived from `agent_events`, Phase 00 §05) and renders the phase sequence as a graph/timeline, with any backward transitions (feedback loops, Phase 06+) rendered as a visually distinct "loop back" indicator rather than a plain forward step.
+Screen 3 reads `Task.workflow_profile_id` and (currently) the fail-closed default profile's fixed contents per `WorkflowProfile.most_conservative()` (§F.1), rendering "why" as "conservative default — real rule-based routing lands in Phase 10" until Phase 10 exists, then automatically becomes accurate once Phase 10 populates real rule-firing metadata. Screen 4 reads `Task.state` (§D.2.1 — durable source of truth) and derives transition history from `agent_events`, rendering the phase sequence as a graph/timeline, with any backward transitions (feedback loops, Phase 06+) rendered as a visually distinct "loop back" indicator rather than a plain forward step.
 
 ## Dependencies
 

@@ -10,7 +10,7 @@ Implement the `Task` Pydantic model and its supporting enums/sub-models exactly 
 
 ## Expected Architecture
 
-`Task` is a runtime-validated Pydantic `BaseModel`, not a `TypedDict` — the blueprint is explicit about why (§B.1: "TypedDicts validate at type-check time only. Pydantic validates at runtime — the right behavior for a safety-critical object."). It lives in `packages/common/task.py`, imported by literally every other package. No business logic lives on the model itself beyond field validation — routing/policy logic belongs in `workflow_engine/` (Phase 10), not here.
+`Task` is a runtime-validated Pydantic `BaseModel`, not a `TypedDict` — the blueprint is explicit about why (§B.1: "TypedDicts validate at type-check time only. Pydantic validates at runtime — the right behavior for a safety-critical object."). It lives in `packages/common/task.py`, imported by literally every other package. No business logic lives on the model itself beyond field validation — routing/policy logic belongs in `workflow_engine/` (Phase 10), not here. **`Task.budget` uses §B.1 defaults at creation until Phase 10**; `resolve_workflow_profile()` may then override `cost_budget_usd` (§B.7).
 
 ## Dependencies
 

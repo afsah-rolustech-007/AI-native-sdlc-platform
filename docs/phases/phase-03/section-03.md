@@ -22,7 +22,7 @@ Section 01 (symbols and their reference relationships are the graph's nodes/edge
 2. Build the `networkx.DiGraph` construction pipeline from extracted edges.
 3. Implement `get_callers(symbol_id, depth) -> list[Symbol]` and `get_callees(symbol_id, depth) -> list[Symbol]` as bounded-depth graph traversals.
 4. Implement `get_dependencies(file_path) -> list[str]` and `get_dependents(file_path) -> list[str]` at file granularity.
-5. Implement `get_impact_set(changed_files) -> ImpactSet` — BFS outward from changed files to their dependents, bounded by a configurable depth (this is what Phase 07's test-impact analysis will call directly).
+5. Implement `get_impact_set(changed_files) -> ImpactSet` — BFS outward from changed files to their dependents, bounded by a configurable depth (§G.6.1; consumed by Phase 07's test-impact analysis).
 6. Unit tests against the fixture repo: known caller/callee relationships resolve correctly; `get_impact_set` for a leaf-module change correctly excludes unrelated modules and includes known dependents.
 
 ## Manual Testing Procedure

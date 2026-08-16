@@ -10,14 +10,15 @@ Section 05's parallel fan-out is only safe because this section exists to catch 
 
 ## Expected Architecture
 
-The Fan-in Coordinator runs after all `Send`-dispatched CodeGen branches complete (LangGraph's native fan-in over `SDLCState.implementation_results`, `worker_coordination_packets`, and `clarification_escalations`), and performs, in order, the decision list from §D.4.1:
+The Fan-in Coordinator runs after all `Send`-dispatched branches complete — each branch having run `CodeGen → Validator(implementation)` per §D.4.0 — and LangGraph's native fan-in aggregates `SDLCState.implementation_results`, `worker_coordination_packets`, and `clarification_escalations`. It performs, in order, the decision list from §D.4.1:
 
-1. **Overlap detection** — computes the file sets touched by each branch's diff (cross-checked against `WorkerCoordinationPacket.touches_files`) and flags any pairwise overlap.
-2. **Semantic conflict detection** — independent of file overlap, checks each branch's `interface_changes` against every other branch's `assumptions`/`discovered_dependencies` for silent drift.
-3. **Merge eligibility** — branches with neither issue merge into the integration worktree.
-4. **Serialize-and-rerun** — flagged pairs are discarded and re-dispatched sequentially (second branch now sees the first's already-applied change); never auto-merged.
-5. **Replan batching** — any `needs_manager_attention=true` WCP or open `ClarificationEscalation` in this fan-in round is batched into **at most one** Implementation Manager replan pass (using the `ReplanContext` assembled per Section 04), which resolves from `ArchitectureDoc`/RI where possible and reaches HITL (`request_type="clarification"` or `"policy_review"`) only for genuine scope/requirement ambiguity.
-6. **Validator triggering** — once merge/serialize/replan resolve, dispatch to `Integration Validator`.
+1. **WCP selection** — highest `attempt_number` per `subtask_id` only.
+2. **Overlap detection** — file sets from validated branches (`ImplementationResult.status="validated"`), cross-checked against WCP and Blackboard diffs.
+3. **Semantic conflict detection** — deterministic rules from §D.4.1.1 (symbol normalization, direct match, substring fallback on assumptions, RI caller cross-check).
+4. **Merge eligibility** — validated branches with neither issue merge into the integration worktree (§D.4.3).
+5. **Serialize-and-rerun** — per §D.4.4: sequential redispatch, incremented `attempt_number`, full branch re-validation, Fan-in re-run.
+6. **Replan batching** — any `needs_manager_attention=true` WCP or open `ClarificationEscalation` batched into **at most one** Implementation Manager replan pass.
+7. **Integration Validator triggering** — once merge/serialize/replan resolve cleanly, dispatch to `Integration Validator`.
 
 `Integration Validator` (High-capability tier, §E.8) then checks the *combined* diff set against interface contracts (using `get_callers`/`get_callees` from Phase 03 to verify no caller was left calling a now-changed signature incorrectly) and runs sandboxed integration tests where applicable.
 
@@ -27,9 +28,9 @@ Section 05 (parallel diffs, `WorkerCoordinationPacket`s, `ClarificationEscalatio
 
 ## Atomic Implementation Tasks
 
-1. Implement file-set overlap detection across `implementation_results`/`worker_coordination_packets` entries.
-2. Implement WCP-based semantic-conflict detection: for each pair of branches, check whether one's `interface_changes` intersects another's `assumptions`/`discovered_dependencies` — this is the check that catches conflicts with zero file overlap.
-3. Implement the serialize-and-rerun path: on detected overlap or semantic conflict, discard the affected diffs, re-dispatch them as a sequential (non-`Send`, ordinary sequential node) pair, second-after-first.
+1. Implement file-set overlap detection across validated `ImplementationResult` entries and their `worker_coordination_packets`.
+2. Implement WCP-based semantic-conflict detection per §D.4.1.1 exactly — deterministic, no LLM calls.
+3. Implement the serialize-and-rerun path per §D.4.4: sequential redispatch via `Command(goto=...)`, not a new `Send` fan-out; Fan-in re-runs after serialized branches re-validate.
 4. Implement the merge step for eligible diffs (apply all diffs into a single integration branch/worktree).
 5. Implement the replan-batching path: collect all `needs_manager_attention`/open `ClarificationEscalation`s from this fan-in round, assemble/pass the `ReplanContext` (Section 04), invoke the Implementation Manager for a single bounded replan pass, and route any unresolved item to HITL (`request_type="clarification"`) — enforce the ≤1-replan-per-group-per-attempt cap (§D.9.6) explicitly in code, not just by convention.
 6. Implement `Integration Validator`: cross-check every changed symbol's callers (via `get_callers`) for signature compatibility, and run any available sandboxed integration tests against the merged branch.

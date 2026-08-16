@@ -21,9 +21,6 @@ QAEvidence (pass/pass_with_warnings/fail)
   Review Manager ── coordinates diff review against design + standards
         │
         ▼
-  Merge Conflict Resolver ── handles any remaining overlapping-branch issues
-        │
-        ▼
   ApprovalGate(pr) ── mandatory for Medium+ risk (fail-closed default: mandatory for all, until Phase 10)
         │
         ▼
@@ -63,6 +60,6 @@ Take a QA-passed task from Phase 07 through Review, `ApprovalGate`(pr), and PR c
 
 1. [ApprovalGate Wiring at All Remaining Checkpoints](section-01.md)
 2. [Evidence Bundle Generator](section-02.md)
-3. [Review Manager & Merge Conflict Resolver](section-03.md)
+3. [Review Manager](section-03.md)
 4. [PR Creation & Auto-Merge Policy](section-04.md)
 5. [Release Manager, Rollback Sub-agent & Monitoring Manager](section-05.md)
