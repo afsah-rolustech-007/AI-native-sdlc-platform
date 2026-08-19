@@ -21,10 +21,12 @@ Phase 00 (Task model for `task_id` field).
 ## Atomic Implementation Tasks
 
 1. Implement `append_only` reducer and every TypedDict from §B.2 verbatim (field names, types, `Annotated` usage).
-2. Implement the 8 stub node functions — each takes `SDLCState`, calls `update_task_state(task_id, TaskState.<phase>)` on entry (§D.2.1), mutates `state[current phase's field]` to a trivial placeholder value, appends one `agent_events` entry via `emit_node_event` (Phase 00 Section 05), and returns the updated state.
-3. Build `dag_constructor.py`'s `build_graph()` function returning a compiled `StateGraph` with the 8 nodes in sequence, `intake` as entry point, `monitoring` as terminal.
-4. Unit test: compile the graph, run it against a fresh `SDLCState`, assert it traverses all 8 nodes in order and `agent_events` has 8 entries at the end.
-5. Unit test: verify `append_only` reducer behavior directly (call it twice, confirm accumulation not replacement) and verify `add_messages` reducer behavior for the `messages` field.
+2. Implement the 8 stub node functions — each takes `SDLCState`, calls `update_task_state(task_id, TaskState.<phase>)` on entry (§D.2.1), mutates `state[current phase's field]` to a trivial placeholder value. Do **not** call OTel from the node body.
+3. Implement `packages/orchestration/telemetry_adapter.py`: wrap each stub so node entry/exit records a `kind="phase"` span via `TelemetrySink` (§B.8.5). Map span start/end to an `AgentEvent` append on `agent_events` (UI channel only). Graph nodes must not import `opentelemetry`.
+4. Build `dag_constructor.py`'s `build_graph()` function returning a compiled `StateGraph` with the 8 wrapped nodes in sequence, `intake` as entry point, `monitoring` as terminal.
+5. Unit test: compile the graph, run it against a fresh `SDLCState`, assert it traverses all 8 nodes in order and `agent_events` has 8 entries at the end.
+6. Unit test: verify `append_only` reducer behavior directly (call it twice, confirm accumulation not replacement) and verify `add_messages` reducer behavior for the `messages` field.
+7. Grep test: `packages/orchestration/` has no `opentelemetry` import.
 
 ## Manual Testing Procedure
 

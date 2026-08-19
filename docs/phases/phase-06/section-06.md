@@ -38,6 +38,7 @@ Section 05 (parallel diffs, `WorkerCoordinationPacket`s, `ClarificationEscalatio
 8. Integration test: deliberately construct a demo scenario where two CodeGen sub-tasks are dispatched with an artificially forced overlapping file, and confirm the serialize-and-rerun path triggers correctly rather than producing a silently broken merge; separately, construct a scenario with a genuine interface mismatch (one module changes a function signature another module calls) and confirm Integration Validator catches it.
 9. Integration test: construct a scenario with **zero file overlap but a semantic conflict** (branch B's `assumptions` relies on a signature branch A's `interface_changes` altered) and confirm the WCP-based check (not file-overlap detection) is what catches it.
 10. Integration test: force two `ClarificationEscalation`s in the same parallel group and confirm they are batched into exactly one Manager replan pass, not two separate ones.
+11. Record a `kind="fan_in"` span around the coordinator; emit events `overlap_detected`, `semantic_conflict`, `serialize_and_rerun`, `replan_triggered` with `subtask_id` lists only (no diffs). WCP emission already appends state — add TelemetrySink event `wcp_emitted` from CodeGen (Section 05) with `subtask_id` + `artifact_refs`.
 
 ## Manual Testing Procedure
 

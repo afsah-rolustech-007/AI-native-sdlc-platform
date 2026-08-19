@@ -10,7 +10,7 @@ This is the mechanical backbone every agent (Phase 05+) will run inside. The two
 
 ## Dependencies
 
-Phase 00 (Task model for `thread_id` keying; tracing for node-level events; sandbox unused yet but budget tracker will wrap nodes here).
+Phase 00 (Task model for `thread_id` keying; `TelemetrySink` for phase spans; sandbox unused yet but budget tracker will wrap nodes here).
 
 ## High-Level Architecture
 
@@ -40,6 +40,7 @@ Run a task through the skeleton graph until it hits the `design_node`'s `interru
 
 - `packages/orchestration/state.py` — `SDLCState` TypedDict with all reducers, per §B.2 (even though most fields are unused by stub nodes at this phase).
 - `packages/orchestration/checkpointers/postgres.py` — `AsyncPostgresSaver` wiring with `thread_id[:255]` enforcement.
+- `packages/orchestration/telemetry_adapter.py` — LangGraph node wrap → `TelemetrySink` only (§B.8.5).
 - Parent `StateGraph` with 8 stub nodes matching the phase state machine (§D.3).
 - One `interrupt()`/`Command(resume=...)` round-trip proven working.
 - Crash-recovery test harness (20-trial loop).

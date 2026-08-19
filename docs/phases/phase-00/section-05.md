@@ -1,56 +1,63 @@
-# Section 05 — OTel Observability Backbone
+# Section 05 — TelemetrySink & OTel Adapter
 
 ## Objective
 
-Stand up the OpenTelemetry tracing pipeline described in §B.8: every graph node (once graphs exist, Phase 01+) will emit a structured trace event `{task_id, node_id, agent_id, phase, model_id, input_tokens, output_tokens, cost_usd, latency_ms, validation_result}`. This section builds and proves the pipeline itself using the sandbox runs from Section 04 as the first real trace-emitting events.
+Stand up the application telemetry contract in §B.8: `TelemetrySink` (no OpenTelemetry imports) plus `OtelTelemetrySink` in `packages/common/tracing.py`. Prove failure isolation using sandbox runs from Section 04 as the first real spans.
 
 ## Why It Exists
 
-Debuggability across 17 phases of increasingly autonomous agent behavior depends entirely on this existing from day one. Without it, Phase 06's "why did the CodeGen sub-agent fail three times" question has no evidence trail. Retrofitting tracing after agents exist means re-instrumenting every agent node — expensive. This section makes emitting a trace event as easy as calling one function, so no future agent skips it out of friction.
+Debuggability across 17 phases depends on this existing from day one. Evaluation (§L) later consumes the same contract — if Phase 00 emits LangGraph-specific or Langfuse-SDK calls, Phase 15 cannot stay orchestrator-independent. Retrofitting after agents exist means re-instrumenting every node.
 
 ## Expected Architecture
 
-`packages/common/tracing.py` configures the OTel SDK with a console exporter (dev) and an OTLP exporter (for Langfuse, if run per `techstack.md`). A single `emit_node_event(**fields)` helper wraps span creation so call sites are one line. Structured logging (`structlog`) is configured to route through the same pipeline so log lines and trace spans correlate by `task_id`.
+`packages/common/telemetry.py` defines `TelemetrySink` (`start_span` / `end_span` / `emit_event` / `record_metric` / `span` context manager) per §B.8.3. Every method **never raises**.
+
+`packages/common/tracing.py` implements `OtelTelemetrySink`: tracer provider, console span exporter (dev), OTLP exporter (optional Langfuse/collector). Map MVP attributes (§B.8.4). Bind `task_id` and `trace_id` into `structlog` via `contextvars`.
+
+Keep `emit_node_event(...)` as a compatibility helper that opens/closes one `sandbox` or generic span with the original nine fields. New code (Phase 01+) must not add parameters to this helper.
+
+No LangGraph in this section. No Langfuse SDK — OTLP only.
 
 ## Dependencies
 
-Section 01 (task_id to correlate events), Section 04 (sandbox runs are the first thing worth tracing).
+Section 01 (`task_id`), Section 04 (sandbox runs to instrument).
 
 ## Atomic Implementation Tasks
 
-1. Configure the OTel SDK: tracer provider, console span exporter for local dev, OTLP exporter pointed at a local Langfuse/collector instance if running.
-2. Implement `emit_node_event(task_id, node_id, agent_id, phase, model_id, input_tokens, output_tokens, cost_usd, latency_ms, validation_result)` as a thin wrapper creating a span with these as attributes.
-3. Wire `emit_node_event` into `run_in_sandbox` (Section 04) so every sandbox execution automatically emits a trace event (with `model_id=None`, `input_tokens=0` etc. since no LLM is involved yet — proving the schema tolerates the agent-less case cleanly).
-4. Configure `structlog` to bind `task_id` and `trace_id` into every log line automatically within a task's execution context (e.g., via `contextvars`).
-5. Add a retention note/config comment: full trace retention target is 90 days (§B.8) — not enforced in code at this phase (no data volume yet), but the exporter config should make setting a retention policy trivial later.
-6. Unit/integration test: run a sandboxed command, capture the emitted span via an in-memory OTel exporter in the test, assert all required attributes are present and correctly typed.
+1. Implement `TelemetrySink` Protocol and a `NoOpTelemetrySink` used in unit tests.
+2. Implement `OtelTelemetrySink` with console exporter; OTLP URL from settings (empty = skip OTLP).
+3. Implement `emit_node_event` as a wrapper over `TelemetrySink.span` with the original field list.
+4. Wire `run_in_sandbox` to emit a `kind="sandbox"` span (`model_id`/tokens null-or-zero).
+5. Bind `task_id` + `trace_id` on structlog for the duration of a sink span.
+6. Unit test: in-memory OTel exporter (or `NoOp` plus a recording sink) asserts required attributes; a second test stubs the exporter to raise and asserts the sandbox command still completes.
 
 ## Manual Testing Procedure
 
-1. Run the Section 04 demo commands with tracing enabled.
-2. If Langfuse is running locally, open its UI and confirm the trace event appears with correct `task_id` correlation.
-3. If not running Langfuse, confirm the console exporter prints a well-formed span with all required fields.
-4. Grep application logs for a `task_id` and confirm log lines and trace span share the same identifier.
+1. Run Section 04 demo with tracing enabled.
+2. If Langfuse (or any OTLP receiver) is running, confirm the span arrives with `task_id`. If not, console exporter is sufficient.
+3. Grep logs: `task_id` matches the span attribute.
 
 ## Expected Demo
 
-Screenshot (or console output) of a trace event for a sandbox run, showing every required field from §B.8's schema populated (with `None`/`0` placeholders where not yet applicable), alongside a correlated log line.
+Console (or screenshot) of a sandbox span with §B.8.4 fields present (zeros/nulls allowed), plus a correlated log line.
 
 ## Acceptance Criteria
 
-- [ ] Every field in §B.8's event schema is present on every emitted event, even when zero/null for non-LLM events.
-- [ ] `task_id` correlates across trace spans and structured log lines for the same execution.
-- [ ] Tracing failure (e.g., exporter unreachable) does not crash or block the underlying operation — tracing is best-effort/non-blocking, verified with a test that disables the exporter and confirms the sandboxed command still completes.
+- [ ] `packages/common/telemetry.py` has no `opentelemetry` import (grep-verifiable).
+- [ ] `tracing.py` is the only OTel SDK usage in Phase 00.
+- [ ] Exporter failure does not fail sandbox execution (explicit test).
+- [ ] `task_id` correlates across spans and logs.
 
 ## Risks
 
-- **Risk:** Treating tracing as load-bearing for control flow (e.g., accidentally making a code path depend on a trace call succeeding) would violate the "tracing must not block execution" principle. **Mitigation:** explicit test in Section 05 (see above) proving trace emission failures are swallowed/logged, not propagated.
+- **Risk:** Call sites import OTel directly. **Mitigation:** grep in CI (Phase 00 §06) for `opentelemetry` outside `tracing.py`.
 
 ## Future Improvements
 
-- Prometheus/Grafana dashboards on top of these events — Phase 15.
-- Formal 90-day retention + indefinite episodic summarization — becomes relevant once real data volume exists (Phase 05+).
+- `record_metric` → Prometheus in Phase 15.
+- GenAI semantic convention aliases (`gen_ai.*`) as additional attributes once LLM spans exist (Phase 02).
+- 90-day retention — ops concern after real volume (Phase 05+).
 
 ## Research Opportunities
 
-None at this stage — this is infrastructure, not a research question.
+None.

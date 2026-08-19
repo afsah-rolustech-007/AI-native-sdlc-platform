@@ -21,7 +21,7 @@ Phase 00 (FastAPI skeleton), Phase 08 (real events to stream — though this sec
 1. Scaffold the Vite + React + TS project with Tailwind and shadcn/ui installed and configured.
 2. Set up OpenAPI schema generation from the FastAPI app and a TS type-generation step (wired into the `Makefile`'s `dev` target so types stay fresh without manual regeneration).
 3. Implement the `apiClient` wrapper with TanStack Query integration.
-4. Implement the FastAPI WebSocket endpoint (`/ws/tasks/{task_id}`) that subscribes to the same event bus `emit_node_event` (Phase 00 §05) already writes to — extend that function to also publish to a pub/sub channel (e.g., Redis pub/sub, already available from Phase 00) the WebSocket endpoint reads from.
+4. Implement the FastAPI WebSocket endpoint (`/ws/tasks/{task_id}`) that subscribes to Redis pub/sub (or the same bus the `telemetry_adapter` / `TelemetrySink` callback publishes `AgentEvent` onto). Do not have the UI read OTel exporters directly.
 5. Implement the `useWebSocket(taskId)` hook: connects, parses `AgentEvent` messages, exposes them reactively, handles reconnection on drop.
 6. Integration test: submit a synthetic event through the backend's pub/sub channel and confirm a connected browser client receives and correctly parses it.
 

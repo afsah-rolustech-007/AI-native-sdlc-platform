@@ -6,31 +6,37 @@ This is the master index. It converts `final_plan.md` Part C (the blueprint's ow
 
 ## 1. Phase Index
 
-| Phase | Name | Sections | Hard Dependencies | One-Line Objective |
-|---|---|---|---|---|
-| [00](phases/phase-00/README.md) | Foundations | 6 | None | Safety scaffolding before any agent writes code. |
-| [01](phases/phase-01/README.md) | Orchestration Skeleton | 4 | 00 | A durable, resumable LangGraph graph with a working interrupt/resume round-trip. |
-| [02](phases/phase-02/README.md) | Model Abstraction Layer | 4 | 00 | Model-independence structural from day one. |
-| [03](phases/phase-03/README.md) | Minimal Repository Intelligence | 6 | 00, 02 | Working retrieval at small scale before scaling. |
-| [04](phases/phase-04/README.md) | Dynamic Requirements Engine | 4 | 03 | Adaptive clarification loop, not a checklist. |
-| [05](phases/phase-05/README.md) | Planning & Intake Agents | 6 | 01, 02, 04 | Wire the Questioning Engine into a real, running intake graph. |
-| [06](phases/phase-06/README.md) | Design & Implementation Agents | 7 | 05 | Design-driven, validated code generation with parallel fan-out. |
-| [07](phases/phase-07/README.md) | Core QA Agents | 5 | 06 | Incremental, impact-scoped QA and bug validation. |
-| [08](phases/phase-08/README.md) | HITL & Release Governance | 5 | 01, 07 | Real approval gates and a real PR flow — nothing merges without them. |
-| [09](phases/phase-09/README.md) | Minimal UI | 6 | 08 | Make the whole system legible to a human. |
-| [10](phases/phase-10/README.md) | Workflow Policy Engine | 4 | 05, 06, 07, 08, 09 | Replace "always conservative" with real, tested routing logic. |
-| [11](phases/phase-11/README.md) | Repository Intelligence at Scale | 5 | 03 (proven) | 100k–1M+ file federated retrieval. |
-| [12](phases/phase-12/README.md) | Context Engineering | 5 | 11 | Token efficiency without accuracy loss. |
-| [13](phases/phase-13/README.md) | Advanced QA | 5 | 07, 10 | Full QA capability stack (security, mutation, performance, a11y). |
-| [14](phases/phase-14/README.md) | MCP & External Integrations | 5 | 08 | Connect to the real engineering ecosystem (GitHub, Jira, Slack). |
-| [15](phases/phase-15/README.md) | Evaluation Framework | 5 | 05–14 | Measure real behavior, not assumed behavior. |
-| [16](phases/phase-16/README.md) | Production Hardening | 0 (single README) | All prior | Prove every mitigation works, not just that it's designed. |
+
+| Phase                           | Name                             | Sections          | Hard Dependencies  | One-Line Objective                                                               |
+| ------------------------------- | -------------------------------- | ----------------- | ------------------ | -------------------------------------------------------------------------------- |
+| [00](phases/phase-00/README.md) | Foundations                      | 6                 | None               | Safety scaffolding before any agent writes code.                                 |
+| [01](phases/phase-01/README.md) | Orchestration Skeleton           | 4                 | 00                 | A durable, resumable LangGraph graph with a working interrupt/resume round-trip. |
+| [02](phases/phase-02/README.md) | Model Abstraction Layer          | 4                 | 00                 | Model-independence structural from day one.                                      |
+| [03](phases/phase-03/README.md) | Minimal Repository Intelligence  | 6                 | 00, 02             | Working retrieval at small scale before scaling.                                 |
+| [04](phases/phase-04/README.md) | Dynamic Requirements Engine      | 4                 | 03                 | Adaptive clarification loop, not a checklist.                                    |
+| [05](phases/phase-05/README.md) | Planning & Intake Agents         | 6                 | 01, 02, 04         | Wire the Questioning Engine into a real, running intake graph.                   |
+| [06](phases/phase-06/README.md) | Design & Implementation Agents   | 7                 | 05                 | Design-driven, validated code generation with parallel fan-out.                  |
+| [07](phases/phase-07/README.md) | Core QA Agents                   | 5                 | 06                 | Incremental, impact-scoped QA and bug validation.                                |
+| [08](phases/phase-08/README.md) | HITL & Release Governance        | 5                 | 01, 07             | Real approval gates and a real PR flow — nothing merges without them.            |
+| [09](phases/phase-09/README.md) | Minimal UI                       | 6                 | 08                 | Make the whole system legible to a human.                                        |
+| [10](phases/phase-10/README.md) | Workflow Policy Engine           | 4                 | 05, 06, 07, 08, 09 | Replace "always conservative" with real, tested routing logic.                   |
+| [11](phases/phase-11/README.md) | Repository Intelligence at Scale | 5                 | 03 (proven)        | 100k–1M+ file federated retrieval.                                               |
+| [12](phases/phase-12/README.md) | Context Engineering              | 5                 | 11                 | Token efficiency without accuracy loss.                                          |
+| [13](phases/phase-13/README.md) | Advanced QA                      | 5                 | 07, 10             | Full QA capability stack (security, mutation, performance, a11y).                |
+| [14](phases/phase-14/README.md) | MCP & External Integrations      | 5                 | 08                 | Connect to the real engineering ecosystem (GitHub, Jira, Slack).                 |
+| [15](phases/phase-15/README.md) | Evaluation Framework             | 5                 | 05–14              | Measure real behavior, not assumed behavior.                                     |
+| [16](phases/phase-16/README.md) | Production Hardening             | 0 (single README) | All prior          | Prove every mitigation works, not just that it's designed.                       |
+
 
 **Total: 17 phases.** Phases 00–15 are broken into sections (each following the fixed template described in `phases/phase-00/README.md`'s sibling sections). Phase 16 is a single, section-free hardening README, since it audits and verifies existing components rather than building new ones.
 
 ---
 
+
+
 ## 2. Dependency Analysis
+
+
 
 ### 2.1 Critical Path (Cannot Be Parallelized by a Solo Engineer, Must Be Built in This Order)
 
@@ -65,29 +71,37 @@ Phases 05–09 run real agents through real phases, but **before Phase 10 exists
 
 ---
 
+
+
 ## 3. Research-Heavy vs. Foundation-Heavy Modules
 
 Useful lens for pacing effort and setting expectations per phase:
 
-| Classification | Phases | Why |
-|---|---|---|
-| **Foundation-heavy** (get this exactly right; low ambiguity, high consequence of error) | 00, 01, 02, 08, 10 | Safety scaffolding, durability, model independence, approval governance, and routing logic are all things where a subtle bug is a safety incident, not a bad user experience. Time spent here is not "slow," it's proportionate. |
-| **Balanced** (real engineering judgment calls, moderate ambiguity) | 03, 05, 06, 07, 09, 14 | Real design decisions exist (which retrieval fusion method, how granular a CodeGen sub-agent should be) but the blueprint gives strong guidance and there's a clear "does it work" test. |
-| **Research-heavy** (expect iteration; first attempt is a baseline, not a final answer) | 04 (question bank tuning), 11 (shard boundary validation), 12 (compression effectiveness), 15 (confidence recalibration, golden dataset construction) | These involve empirical tuning against data that doesn't exist until you generate it. Budget for a "build v1, measure, revise" loop rather than expecting the first implementation to be final. |
-| **Depth-add, not core-path** (system already works without these; they make it better/safer/faster) | 13, 16 | The system is functionally complete and demoable after Phase 10. 13 and 16 (and 15) are about *trust and robustness at scale*, not new core capability. |
+
+| Classification                                                                                      | Phases                                                                                                                                                | Why                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Foundation-heavy** (get this exactly right; low ambiguity, high consequence of error)             | 00, 01, 02, 08, 10                                                                                                                                    | Safety scaffolding, durability, model independence, approval governance, and routing logic are all things where a subtle bug is a safety incident, not a bad user experience. Time spent here is not "slow," it's proportionate. |
+| **Balanced** (real engineering judgment calls, moderate ambiguity)                                  | 03, 05, 06, 07, 09, 14                                                                                                                                | Real design decisions exist (which retrieval fusion method, how granular a CodeGen sub-agent should be) but the blueprint gives strong guidance and there's a clear "does it work" test.                                         |
+| **Research-heavy** (expect iteration; first attempt is a baseline, not a final answer)              | 04 (question bank tuning), 11 (shard boundary validation), 12 (compression effectiveness), 15 (confidence recalibration, golden dataset construction) | These involve empirical tuning against data that doesn't exist until you generate it. Budget for a "build v1, measure, revise" loop rather than expecting the first implementation to be final.                                  |
+| **Depth-add, not core-path** (system already works without these; they make it better/safer/faster) | 13, 16                                                                                                                                                | The system is functionally complete and demoable after Phase 10. 13 and 16 (and 15) are about *trust and robustness at scale*, not new core capability.                                                                          |
+
 
 ---
+
+
 
 ## 4. Cross-Phase Consistency Rules
 
 A few rules apply across every phase and are stated once here rather than repeated 17 times:
 
-1. **Every phase must leave `main` in a runnable state.** `docker-compose up && make migrate && make dev` must work at the end of every phase, from a clean checkout.
+1. **Every phase must leave** `main` **in a runnable state.** `docker-compose up && make migrate && make dev` must work at the end of every phase, from a clean checkout.
 2. **No phase silently disables a safety mechanism from an earlier phase.** If Phase 10's routing logic needs to loosen an approval requirement Phase 08 made unconditional, that loosening must be an explicit, tested rule in `resolve_workflow_profile()` — never a quiet removal of the earlier check.
-3. **Every new agent, from Phase 05 onward, is a `ModelAdapter` consumer and a MASC-validated node** — no exceptions "just for this one simple agent." Consistency here is what makes Phase 16's chaos tests and Phase 15's evaluation pipeline able to reason about *every* agent uniformly.
+3. **Every new agent, from Phase 05 onward, is a** `ModelAdapter` **consumer, a MASC-validated node, and a `TelemetrySink` span producer** — no exceptions. Uniform instrumentation is what lets Phase 15 evaluate every agent the same way.
 4. **Section acceptance criteria are the source of truth for "done," not this roadmap's one-line summaries.** This document is a map; `phases/phase-NN/section-XX.md` is the territory.
 
 ---
+
+
 
 ## 5. Ready for Repository Initialization — Summary
 
@@ -96,7 +110,7 @@ This roadmap is documentation-only by design (see brief). The next step — actu
 ### 5.1 What Repository Initialization Should Create
 
 1. **Directory skeleton** matching `final_plan.md` §Q, but populated only with the pieces Phase 00 actually needs on day one — do not pre-create empty directories for Phase 14's `mcp_integrations/` or Phase 9's `ui/` before those phases start. Minimum viable skeleton for Phase 00:
-   ```
+  ```
    sdlc-platform/
    ├── apps/api/                 # FastAPI app, empty router
    ├── apps/worker/               # ARQ worker entrypoint stub
@@ -110,11 +124,13 @@ This roadmap is documentation-only by design (see brief). The next step — actu
    ├── Makefile                    # up / migrate / test / dev targets
    ├── .env.example
    └── README.md                   # points back to this docs/ set
-   ```
-2. **`pyproject.toml`** with the Phase 00 dependency set only: `pydantic`, `fastapi`, `sqlalchemy[asyncio]`, `alembic`, `asyncpg`, `redis`, `arq`, `opentelemetry-sdk`, `structlog`, `pytest`, `pytest-asyncio`, `ruff`, `mypy`. Do **not** add `langgraph`, `langchain-core`, Tree-sitter/Zoekt bindings, or any model-provider SDK yet — those arrive with Phases 01, 02, and 03 respectively, each as its own atomic task, so the dependency graph documents the build order as it grows.
-3. **`docker-compose.yml`** with Postgres 16 (pgvector extension pre-enabled via init script, even though nothing uses it until Phase 3 — enabling the extension is a one-line Phase 00 task, using it is not) and Redis 7.2. No Langfuse container yet unless you want tracing visualization from day one (recommended but optional per `techstack.md` §7).
-4. **`.env.example`** documenting: `DATABASE_URL`, `REDIS_URL`, and placeholders for secrets that don't exist yet (commented out, not fabricated).
+  ```
+2. `pyproject.toml` with the Phase 00 dependency set only: `pydantic`, `fastapi`, `sqlalchemy[asyncio]`, `alembic`, `asyncpg`, `redis`, `arq`, `opentelemetry-sdk`, `structlog`, `pytest`, `pytest-asyncio`, `ruff`, `mypy`. Do **not** add `langgraph`, `langchain-core`, Tree-sitter/Zoekt bindings, or any model-provider SDK yet — those arrive with Phases 01, 02, and 03 respectively, each as its own atomic task, so the dependency graph documents the build order as it grows.
+3. `docker-compose.yml` with Postgres 16 (pgvector extension pre-enabled via init script, even though nothing uses it until Phase 3 — enabling the extension is a one-line Phase 00 task, using it is not) and Redis 7.2. No Langfuse container yet unless you want tracing visualization from day one (recommended but optional per `techstack.md` §7).
+4. `.env.example` documenting: `DATABASE_URL`, `REDIS_URL`, and placeholders for secrets that don't exist yet (commented out, not fabricated).
 5. **CI skeleton** (GitHub Actions or equivalent) running `ruff check`, `mypy`, and `pytest tests/unit` on every push — this is itself a Phase 00 atomic task (see `phases/phase-00/section-06.md`), not pre-existing tooling to take for granted.
+
+
 
 ### 5.2 What Repository Initialization Should Explicitly NOT Create
 
@@ -122,6 +138,8 @@ This roadmap is documentation-only by design (see brief). The next step — actu
 - No UI project — Phase 09 work; creating it early invites premature frontend decisions before backend shapes stabilize.
 - No MCP client code — Phase 14 work.
 - No `model_adapters/` implementation beyond the empty package directory — the `ModelAdapter` Protocol itself is Phase 02's first atomic task, not a scaffolding concern.
+
+
 
 ### 5.3 First Three Atomic Tasks After Scaffolding (Pointer, Not Duplicate — Full Detail in Phase 00)
 

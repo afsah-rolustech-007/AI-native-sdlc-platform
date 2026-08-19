@@ -23,7 +23,7 @@ Section 02 (durable checkpointing — resume must survive a real process boundar
 3. Confirm graph execution halts at `interrupt()` and `graph.get_state(config).next` shows the `design_node` (or its interrupt point) as the pending step.
 4. Confirm `Command(resume=...)` continues execution past the interrupt and the remaining stub nodes complete normally.
 5. Test the "reject" path too — confirm the stub node can branch on the resume value (even trivially, e.g., logging a different event) to prove resume values are actually usable by node logic, not just accepted and ignored.
-6. Integration test automating the full pause/inspect/resume/complete cycle without manual CLI interaction.
+6. Wrap `interrupt()` with a `kind="hitl"` span: start on pause, end on resume (§B.8.5). Duration is wall-clock wait. Do not fail the task if the sink errors.
 
 ## Manual Testing Procedure
 

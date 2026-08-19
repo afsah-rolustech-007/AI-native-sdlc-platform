@@ -10,7 +10,7 @@ This is the empirical foundation the roadmap has been deferring since Phase 04 �
 
 ## Dependencies
 
-Section 01 (scoring pipeline), accumulated real task history from Phases 05–14.
+Section 04 (`EvaluationEngine`), accumulated real task history from Phases 05–14.
 
 ## Atomic Implementation Tasks
 

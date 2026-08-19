@@ -2,7 +2,7 @@
 
 ## Objective
 
-Implement `EvaluationPipeline.score(task_id)` (§L.1): on every task completion, compute Fix Rate, Token Efficiency, Cost, HITL Count, Rollback Count, Cycle Time, and Attribution Accuracy in parallel, within 60 seconds, and persist to `evaluation_results` (§R).
+Implement `EvaluationPipeline.score(task_id)` as an ARQ job: hydrate a `RunRecord` via `packages/evaluation/loaders/postgres.py`, call `EvaluationEngine` (§L.6), persist Task-Level KPIs to `evaluation_results` and per-metric rows to `evaluation_scores` (§R), within 60 seconds.
 
 ## Why It Exists
 
@@ -10,15 +10,16 @@ This is the mechanism that turns the KPI tables in §L.2 from documentation into
 
 ## Dependencies
 
-Phase 00 (`evaluation_results` table), all prior phases (the data each formula reads).
+Phase 00 (`cost_tracking`; `evaluation_results` / `evaluation_scores` migrations may land here or in Section 05). **Build Section 04's `EvaluationEngine` skeleton in the same sitting** — this section is the job trigger, not a parallel formula pile.
 
 ## Atomic Implementation Tasks
 
-1. Implement each formula from §L.1/§L.2's Task-Level table against real data sources already populated by prior phases (`cost_tracking`, `hitl_log`, `SDLCState.rollback_count`, task timestamps).
-2. Implement Attribution Accuracy (maps failures to root-cause agent) using the Feedback Loop Registry's logged `source_agent`/`target_agent` data (Phase 10 §04).
-3. Wire `EvaluationPipeline.score()` to run as an async ARQ job triggered on task completion, with a 60-second SLA.
-4. Implement Phase-Level and Agent-Level KPIs (§L.2) as queries over the same underlying data, not separately tracked state.
-5. Test: complete a demo task and confirm all KPIs populate correctly and within the time budget.
+1. Implement deterministic evaluators for §L.1 Task-Level KPIs against `cost_tracking`, `hitl_log`, `Task.state`, `rollback_count`.
+2. Implement Attribution Accuracy using `feedback_loop_events` (Phase 10 §04). Do not parse LangGraph checkpoints.
+3. Wire `EvaluationPipeline.score()` as an ARQ job on task completion (60s SLA).
+4. Persist `evaluation_results` plus one `evaluation_scores` row per `metric_id`.
+5. Grep: `packages/evaluation/` contains no `langgraph` import.
+6. Test: complete a demo task; KPIs match hand calculation.
 
 ## Manual Testing Procedure
 

@@ -55,7 +55,8 @@ Running this script twice — once within budget, once forcing a budget breach �
 - `db/migrations/` — initial Alembic schema for `tasks`, `cost_tracking`, `hitl_log` (unused until Phase 8, but schema created now per §R) tables.
 - `packages/common/sandbox.py` — ephemeral container execution wrapper.
 - `packages/common/budget.py` — kill-switch node logic.
-- `packages/common/tracing.py` — OTel setup + structured event emitter.
+- `packages/common/telemetry.py` — `TelemetrySink` Protocol (§B.8).
+- `packages/common/tracing.py` — `OtelTelemetrySink` + `emit_node_event` helper.
 - `apps/worker/` — ARQ worker entrypoint (no real jobs yet, just the runtime).
 - CI pipeline running lint/type/unit tests on every push.
 
@@ -65,5 +66,5 @@ Running this script twice — once within budget, once forcing a budget breach �
 2. [Database Schema, Migrations & Config Management](section-02.md)
 3. [Cost Kill-Switch & Budget Governance](section-03.md)
 4. [Execution Sandbox](section-04.md)
-5. [OTel Observability Backbone](section-05.md)
+5. [TelemetrySink & OTel Adapter](section-05.md)
 6. [Job Queue Scaffolding & CI Pipeline](section-06.md)

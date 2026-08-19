@@ -2,40 +2,38 @@
 
 ## Objective
 
-Implement the platform self-evaluation regression suite (§L.4: re-run the golden dataset against every platform change — prompt, model, graph — before it ships) and DORA metrics (§L.5: Deployment Frequency, Lead Time, Change Failure Rate, MTTR) as an operational dashboard.
+Implement DORA metrics (§L.5) from `DeploymentRecord` and incident/rollback data, and a Grafana dashboard for DORA plus KPI trends from `evaluation_results`.
 
 ## Why It Exists
 
-§L.4 is the platform's own CI for itself — treating prompts and graph topology as the versioned artifacts they are, with the same regression discipline the platform enforces on the code it generates. DORA metrics give a standard, externally-legible measure of whether the platform is actually delivering faster/safer software, tying back to the project's core motivation.
+DORA is the externally-legible delivery view. Platform regression **gating** lives in Section 05 (experiments), not here — this section is visualization.
 
 ## Dependencies
 
-Section 02 (golden dataset to regress against), Phase 08 §05 (`DeploymentRecord` data for DORA metrics).
+Section 01 (KPI rows), Phase 08 §05 (`DeploymentRecord`).
 
 ## Atomic Implementation Tasks
 
-1. Implement the platform self-evaluation CI job: re-run the golden dataset against a proposed prompt/model/graph change, diff results against the current baseline, block the change on regression.
-2. Test this by deliberately introducing a prompt regression (e.g., a change that removes a key instruction) and confirming the CI job catches the resulting golden-dataset score drop.
-3. Implement DORA metrics computation from `DeploymentRecord` (Phase 08 §05) and `rollback_count`/incident data (Phase 08 §05's `MonitoringManager`).
-4. Build a Grafana dashboard (per `techstack.md`) surfacing DORA metrics and the KPI trends from Section 01.
+1. Compute DORA four keys from `DeploymentRecord` + rollback/incident data.
+2. Grafana dashboard: DORA + `fix_rate` / `cost_usd` / `cycle_time_s` trends.
+3. Test DORA formulas against known `DeploymentRecord` history.
 
 ## Manual Testing Procedure
 
-Introduce a deliberate prompt regression on a branch, run the self-evaluation CI job, and confirm it flags the regression before merge; separately, verify DORA metrics compute correctly against known `DeploymentRecord` history.
+Verify DORA numbers against a hand-calculated week of demo deploys.
 
 ## Expected Demo
 
-The self-evaluation CI job catching the deliberately introduced regression, plus the Grafana dashboard showing live DORA metrics and KPI trends — this is the phase's headline demo per the README.
+Grafana showing DORA + KPI trends.
 
 ## Acceptance Criteria
 
-- [ ] The self-evaluation CI job successfully blocks a deliberately regressive platform change.
 - [ ] DORA metrics compute correctly and are visible on a live dashboard.
 
 ## Risks
 
-Self-evaluation is only as good as golden dataset coverage (Section 02's risk) — a regression outside covered categories won't be caught; this is a known, documented limitation, not a silent gap.
+Low deploy volume in solo-dev makes DORA noisy — show raw counts alongside rates.
 
 ## Future Improvements
 
-None planned beyond expanding golden dataset coverage (Section 02).
+None beyond dataset coverage.

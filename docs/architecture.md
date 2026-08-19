@@ -25,7 +25,7 @@ Everything in the blueprint reduces to five interacting systems. Understanding t
 Two supporting systems cut across all five and are not optional at any phase:
 
 - **Model Abstraction Layer** (§I) — every agent call goes through a `ModelAdapter`, never a provider SDK. This exists from Phase 0 forward because retrofitting it later means touching every agent.
-- **Observability / Cost Governance** (§B.7, §B.8) — every node emits a trace event and every token is cost-tracked. This exists from Phase 0 because it is the mechanism that makes every later phase debuggable and demoable.
+- **Observability / Cost Governance** (§B.7, §B.8) — `TelemetrySink` records Task→Phase→Manager→Agent→LLM/Tool/Validation spans; every token is cost-tracked. OpenTelemetry is the *export* layer, not the application contract. Evaluation (§L) reads telemetry + state, never LangGraph. This exists from Phase 0 because it is the mechanism that makes every later phase debuggable and demoable.
 
 ---
 
@@ -42,7 +42,7 @@ This is the real dependency graph — not the SDLC phase order (intake→...→d
             ▼                   ▼                   ▼
  ┌─────────────────┐  ┌──────────────────┐  ┌──────────────────┐
  │ Cost/Sandbox/    │  │  LangGraph        │  │  Model Adapter   │
- │ OTel Foundations │  │  Orchestration    │  │  Layer (§I)      │
+ │ TelemetrySink    │  │  Orchestration    │  │  Layer (§I)      │
  │ (§B.6,B.7,B.8)   │  │  Skeleton (§D)    │  │                  │
  └────────┬─────────┘  └─────────┬─────────┘  └────────┬─────────┘
           │                      │                     │
@@ -98,9 +98,9 @@ This is the real dependency graph — not the SDLC phase order (intake→...→d
                                     │
                                     ▼
                         ┌───────────────────────┐
-                        │ Evaluation Framework   │  (§L) — needs
-                        │ (§L)                   │  real, varied task
-                        │                        │  outcomes to measure
+                        │ Evaluation Framework   │  (§L) — scores RunRecords
+                        │                        │  from TelemetrySink + DB;
+                        │                        │  never LangGraph types
                         └───────────┬─────────────┘
                                     ▼
                         ┌───────────────────────┐
@@ -203,7 +203,8 @@ Full detail in §D.9 of the blueprint. One invariant governs everything else in 
 - **Explicitly rejected (§D.9.7):** worker↔worker messaging, swarm/debate/voting for core workflow, always-on coordination windows, recursive worker spawning, and an LLM-driven Merge Resolution Agent — merge conflicts are resolved deterministically by the Fan-in Coordinator (serialize-and-rerun), never by a separate merge agent or model call.
 - **Idempotent workers (§D.9.8):** every parallel worker must tolerate retries, checkpoint replay, and resume without duplicate side effects.
 - **Pre-dispatch overlap check (§D.4.2):** Implementation Manager may adjust decomposition before `Send()` when RI reveals obvious file overlap — Fan-in remains final authority.
-- **`AgentEvent` observational only (§B.8, §P):** never used for routing, scheduling, planning, or replanning.
+- **`AgentEvent` observational only (§B.8, §P):** never used for routing, scheduling, planning, or replanning. Not an evaluation scoring source.
+- **Telemetry is orchestrator-independent (§B.8):** LangGraph talks to `TelemetrySink` via `telemetry_adapter.py`. Evaluators consume `RunRecord`, not graph nodes.
 - **Task ↔ graph sync (§D.2.1):** `Task.state` in Postgres is the durable phase source of truth; updated on graph node entry. `SDLCState` does not carry `task_state`.
 - **HITL lifecycle (§D.7.1):** `hitl_log` (Postgres) is durable; `SDLCState.hitl_queue` is in-graph pending set; UI queries `hitl_log WHERE responded_at IS NULL`.
 - **Git isolation (§D.4.3):** one worktree per `(task_id, subtask_id)`; Fan-in merges into integration worktree only.
@@ -234,6 +235,7 @@ Three axioms carried through every part of the system, restated here because the
 3. **Deterministic and auditable over clever (Principle 5).** Rule tables and named tools beat learned/black-box equivalents wherever both are viable — this is why routing is an ordered `if/elif` function (§F.3), not a trained classifier.
 4. **Intentional worker isolation (Principle 9, §A.2).** Parallel workers are deliberately unaware of sibling workers; cross-worker knowledge is delayed until Fan-in. This preserves determinism, auditability, reproducibility, and deadlock-free parallelism — not merely a messaging restriction.
 5. **`AgentEvent` is observational only (§B.8, §P).** Routing, scheduling, planning, and replanning never read the event stream; control flow uses `SDLCState` typed channels, Validators, RI, and the Workflow Policy Engine only.
+6. **Telemetry never fails a task (§B.8).** Exporter down → log and continue. Evaluation never imports LangGraph.
 
 ---
 

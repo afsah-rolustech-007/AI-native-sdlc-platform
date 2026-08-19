@@ -71,7 +71,7 @@ Three test layers exist from Phase 0 onward and grow with the system — never i
 2. **Integration tests** — a real Postgres (via `docker-compose` / testcontainers) and a real (small, fixture) repo for Repository Intelligence tests. Slower; run before marking a section complete.
 3. **Contract tests** (from Phase 2 onward) — every `ModelAdapter` implementation, and later every `Validator`/`ApprovalGate` config, must pass the same shared contract suite. This is what makes "add a second model provider with zero orchestration changes" (Phase 16's acceptance test) actually verifiable rather than aspirational.
 
-From Phase 15 onward, a fourth layer exists: **benchmark/regression tests against the golden dataset** — these are allowed to be slow and are not run on every commit, but must run before any prompt, model, or agent-logic change is considered complete.
+From Phase 15 onward, a fourth layer exists: **benchmark/regression tests against the golden dataset** via `EvaluationEngine` (`packages/evaluation/` must not import LangGraph). These are allowed to be slow and are not run on every commit (subset on PR, fuller set on main/nightly), but must run before any prompt, model, or agent-logic change is considered complete.
 
 **Rule for flaky or LLM-output-dependent tests:** assert on structure (schema conformance, required fields present, confidence bounds) and on deterministic sub-behaviors (tool calls made, retrieval invoked) rather than on exact LLM text output. Where exact-output determinism matters (routing rules, MASC schema checks, confidence formula), those are pure functions with no model call — write them that way specifically so they're fully deterministic to test.
 
@@ -82,7 +82,7 @@ From Phase 15 onward, a fourth layer exists: **benchmark/regression tests agains
 Every phase's README specifies one **live demo** — an end-to-end script or UI walkthrough that a person unfamiliar with the code could watch and understand what the phase added. Concretely:
 
 - Phases 0–2 (foundations): CLI-driven demos (a script that creates a Task, runs it through the sandbox, prints the trace).
-- Phases 3–8 (core agents): a combination of CLI + inspectable Postgres state (query the `tasks`/`hitl_log`/`cost_tracking` tables to show real rows) + Langfuse trace links.
+- Phases 3–8 (core agents): a combination of CLI + inspectable Postgres state (query the `tasks`/`hitl_log`/`cost_tracking` tables to show real rows) + optional Langfuse UI via OTLP (not required for the demo to count).
 - Phase 9 onward: the UI itself becomes the primary demo surface — screenshots or short recordings of the relevant screen(s) showing the new capability live.
 - Phase 15 onward: dashboards (Grafana/KPI screens) become part of the demo — a phase isn't "demoed" by code working once, it's demoed by the metric that phase was supposed to move actually moving.
 

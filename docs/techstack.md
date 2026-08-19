@@ -65,14 +65,15 @@ The blueprint's own comparative analysis (§0.1, §G.3) already did the hard eva
 
 ## 5. Observability, QA Tooling, and Supporting Libraries
 
-These are adopted directly from the blueprint's own tech stack table (§O) without modification — the blueprint's reasoning for each is already sound and specific to this project's needs (e.g., Zoekt's proven scale, ruff replacing three tools, uv's speed). Restated here in one place for a single reference document:
-
 | Category | Tool | Notes |
 |---|---|---|
-| Tracing | OpenTelemetry SDK 1.25+ | Per-node spans; the backbone Phase 0 builds first. |
-| Agent trace visualization | Langfuse (self-hosted) 2.x | Token cost per agent per task — critical for a solo engineer debugging agent behavior. |
-| Metrics / Dashboards | Prometheus 2.52+ / Grafana 10.x | System + KPI dashboards; only becomes load-bearing from Phase 15 (Evaluation) onward, but the OTel plumbing exists from Phase 0. |
-| Logging | structlog 24.x | Structured JSON into the same OTel pipeline. |
+| Application telemetry contract | `TelemetrySink` (§B.8) | Owned interface. Agents/orchestrator never import OTel. |
+| Tracing export | OpenTelemetry SDK 1.25+ | Only in `packages/common/tracing.py`. OTLP. |
+| Trace UI | Langfuse (self-hosted) 2.x | **Optional OTLP backend**, not the eval API. Skip SDK. |
+| Metrics / Dashboards | Prometheus 2.52+ / Grafana 10.x | Phase 15. |
+| Logging | structlog 24.x | `task_id` + `trace_id` correlation. |
+| Experiment tracking | Postgres `evaluation_experiments` | **Not MLflow.** |
+| LLM-as-Judge libraries | none at MVP | DeepEval optional later, behind `Evaluator` Protocol. |
 | Static analysis | ruff 0.4+, mypy 1.10+ | ruff replaces flake8+black+isort in one tool — meaningfully less config for a solo engineer. |
 | Security (inline) | Semgrep 1.70+ | Fast, pattern-based, runs inline during QA (Phase 13). |
 | Security (deep) | CodeQL latest | Periodic dataflow analysis (Phase 13) — catches classes of bugs Semgrep's pattern matching structurally cannot. |
@@ -98,7 +99,8 @@ Documenting what was *not* chosen matters as much as what was, so future-you doe
 - **Multi-tenancy infrastructure at MVP** — explicitly a non-goal (§A.3). No tenant-scoping schema work until requested.
 - **Kubernetes at MVP** — named as a P3/future item (§O's IaC row, §T P3). A solo engineer running `docker-compose` locally and a single deploy target is the right scope; Kubernetes is operational overhead with no payoff until horizontal worker scaling is an actual bottleneck (signal: queue depth metrics from Phase 16's load test).
 - **A learned/ML-based router in place of `resolve_workflow_profile()`** — deliberately rejected by the blueprint itself (Principle 5, §A.2) in favor of an auditable, unit-testable rule function. This is a safety-motivated choice, not a laziness one — do not "upgrade" it to ML without a very strong evaluation-driven reason and a lot of golden-dataset evidence (§L.3).
-- **A second vector DB or graph DB "just in case" at MVP** — YAGNI. pgvector and NetworkX are correct until Phase 11's actual scale-driven trigger.
+- **LangSmith as the observability/eval product** — rejected (§B.8.7). OTLP + optional self-hosted Langfuse for humans; owned `EvaluationEngine` for scores.
+- **MLflow as experiment tracker** — rejected. Postgres `evaluation_experiments` is enough for one engineer.
 
 ---
 

@@ -10,7 +10,7 @@ Every one of the ~25 named agents across §E.8's roster shares the same cross-cu
 
 ## Expected Architecture
 
-`packages/agents/base.py`'s `BaseAgent` provides: a `run(state: SDLCState) -> SDLCState` template method that (1) assembles context (minimally at this phase — full progressive/budgeted context assembly is Phase 12), (2) calls `ModelRouter.select()` (Phase 02) for the appropriate `(phase, operation)`, (3) invokes the model via `ModelAdapter`, (4) passes the raw output through `MASCEngine.validate()`, (5) on failure, raises a structured error the graph's retry policy handles, (6) on success, writes validated output to `SDLCState` and emits a trace event with `validation_result` populated. `packages/orchestration/masc.py` implements `MASCEngine` per §E.6, with Check 1 (schema validation against the agent's declared Pydantic output schema) and Check 2 (confidence threshold from §B.4's phase floors) fully implemented; Check 3 (semantic drift) implemented as an interface method that returns "not checked" until Phase 06.
+`packages/agents/base.py`'s `BaseAgent` provides: a `run(state: SDLCState) -> SDLCState` template method that (1) assembles context (minimally at this phase — full progressive/budgeted context assembly is Phase 12), (2) opens an `kind="agent"` span on `TelemetrySink`, (3) calls `ModelRouter.select()` (Phase 02) for the appropriate `(phase, operation)`, (4) invokes the model via `ModelAdapter` (child `llm_call` spans from Phase 02 wrapper), (5) records `tool_call` spans around each tool invocation, (6) passes the raw output through `MASCEngine.validate()` inside a `validation` span, (7) on failure, raises a structured error the graph's retry policy handles (`attempt_number` on the next agent span), (8) on success, writes validated output to `SDLCState` and ends the agent span. `packages/orchestration/masc.py` implements `MASCEngine` per §E.6, with Check 1 (schema validation against the agent's declared Pydantic output schema) and Check 2 (confidence threshold from §B.4's phase floors) fully implemented; Check 3 (semantic drift) implemented as an interface method that returns "not checked" until Phase 06.
 
 ## Dependencies
 
@@ -22,7 +22,7 @@ Phase 02 (`ModelRouter`, `ModelAdapter`), Phase 00 (tracing, budget).
 2. Implement `MASCEngine.validate(output, agent_id, phase, state)` per §E.6's exact structure: Check 1 (Pydantic schema validation, zero tokens), Check 2 (confidence threshold lookup from §B.4's `CONFIDENCE_THRESHOLDS`, zero tokens), Check 3 stub.
 3. Implement Fail-Closed behavior for MASC itself: if `validate()` raises internally (bug in a check, unexpected input shape), treat as `severity="error"`, route to human — per §E.6's own comment ("Fail-Closed: if MASC itself errors → treat as severity='error', route to human"). Unit-test this explicitly, following the same pattern established in Phase 00 §03 and Phase 04 §04.
 4. Wire per-node retry policy using `Task.budget.max_retries_per_node` (Phase 00's `Task` model) — exponential backoff, per §D.5.
-5. Wire `BaseAgent.run()` to emit OTel events via Phase 00's `emit_node_event`, now populating every field (`agent_id`, `model_id`, tokens, cost, `validation_result`) for the first time with a real agent.
+5. Wire `BaseAgent.run()` to `TelemetrySink` spans as specified in Expected Architecture — not `emit_node_event` with a growing kwargs list.
 6. Unit tests: a mock agent with a known-bad output schema is correctly rejected by MASC Check 1; a mock agent whose declared confidence is below the phase floor is correctly rejected by Check 2; a MASC internal exception correctly resolves to "error, route to human," not silently passing.
 
 ## Manual Testing Procedure
@@ -39,7 +39,7 @@ Terminal output of the trivial test agent run three times: (1) valid output, pas
 
 - [ ] `BaseAgent` correctly integrates model routing, MASC validation, retry, and tracing for a trivial test agent.
 - [ ] MASC Checks 1 and 2 are fully functional and independently unit-tested, including their own Fail-Closed behavior.
-- [ ] Every real agent output flowing through `BaseAgent.run()` produces a complete OTel trace event (no more null `model_id`/token fields, unlike Phase 00's sandbox-only events).
+- [ ] Every real agent output flowing through `BaseAgent.run()` produces an AGENT span with child LLM and VALIDATION spans (`model_id`/tokens populated on LLM). `packages/agents/` has no `opentelemetry` import.
 
 ## Risks
 

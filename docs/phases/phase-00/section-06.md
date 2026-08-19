@@ -21,7 +21,7 @@ Section 02 (Redis config), Section 05 (trace emission from within the worker job
 1. Implement `apps/worker/main.py` with ARQ `WorkerSettings`, Redis connection from `packages/common/config.py`.
 2. Implement one trivial job function that: emits a trace event, optionally records a `cost_tracking` row with zero cost (proving the worker can reach both Postgres and the tracer), and returns a result.
 3. Implement `apps/api/main.py` as a minimal FastAPI app with a single `/health` endpoint (checks Postgres + Redis connectivity) — this is the seed of Phase 01's API, built now because "is the system up" is a Phase 00 concern.
-4. Write the CI workflow: lint, type-check, unit tests, Alembic autogenerate-diff check, all against a service-container Postgres+Redis.
+4. Write the CI workflow: lint, type-check, unit tests, Alembic autogenerate-diff check, all against a service-container Postgres+Redis. Include a grep step: `opentelemetry` imports only allowed in `packages/common/tracing.py`.
 5. Write the `Makefile` targets: `up`, `migrate`, `test`, `dev` (runs API + worker concurrently via a process manager or two terminal commands documented in the README).
 6. End-to-end integration test: enqueue the trivial job via ARQ's client, confirm the worker processes it and the expected trace/DB side effects occur.
 

@@ -507,11 +507,186 @@ Incoming phase manager reads this packet as primary context. Full upstream detai
 
 
 
-## B.8 Observability
+## B.8 Observability & Telemetry Contract
 
-Every graph node emits a structured OTel trace event: `{task_id, node_id, agent_id, phase, model_id, input_tokens, output_tokens, cost_usd, latency_ms, validation_result}`. Full trace retention: 90 days. Summarized episodic outcomes: indefinite. LangSmith/Langfuse for agent trace visualization and token cost per task.
+Observability is a supporting system, not an orchestration concern. LangGraph is one orchestrator implementation. Evaluation (§L) must never import LangGraph types.
 
-**`AgentEvent` (§P) is observational only.** It exists for logging, tracing, metrics, debugging, and auditability — the UI/OTel projection of what already happened. Routing, scheduling, planning, and replanning must **never** read `AgentEvent` or `agent_events` from `SDLCState` to make decisions. Orchestration inputs are exclusively: `SDLCState` typed channels, Validators, Repository Intelligence, Workflow Policy Engine outputs, and Manager reasoning over those sources.
+```
+Any Orchestrator  →  TelemetrySink (this section)  →  OTel adapter  →  OTLP exporter  →  backend
+                                                                                         (console | Langfuse | collector)
+EvaluationEngine (§L)  ←  TelemetrySink export + SDLCState artifacts + Postgres tables
+```
+
+**Hard rules**
+
+1. Orchestration code talks only to `TelemetrySink`. It never imports OTel, Langfuse, or LangSmith SDKs.
+2. Telemetry failure never fails a task: every `TelemetrySink` method swallows exporter errors, logs them, and returns. Proven by test from Phase 00 §05.
+3. `AgentEvent` (§P) is a **UI projection** of telemetry + state changes. It is not the telemetry contract and is not an evaluation input for scoring (UI may display scores after §L writes them).
+4. Typed SDLCState (WCP, ClarificationEscalation, FeedbackReport, ValidationFlag, PhaseHandoffPacket) remains the **source of truth for content**. Telemetry records that those objects were produced (IDs + Blackboard refs), not a second copy of their payloads.
+5. No graph node, Manager, Fan-in Coordinator, Validator, or policy function may read telemetry or `agent_events` to decide routing. Same rule as §P.
+
+### B.8.1 What is a trace vs a span vs an event vs a metric vs a log
+
+| Kind | Used for | Why |
+|---|---|---|
+| **Trace** | One `Task` execution (`trace_id` = task-scoped, set at graph invoke) | Reconstruct the whole run. One parent for all child work. |
+| **Span** | Timed unit of work with start/end: PHASE, MANAGER, AGENT, LLM_CALL, TOOL_CALL, VALIDATION, FAN_IN, HITL, SANDBOX | Latency, status, parent/child. Enough to rebuild Decision → Action → Result. |
+| **Event** (span event) | Instant facts that are not themselves timed work: WCP emitted, clarification raised, feedback-loop fired, kill-switch tripped, serialize-and-rerun | Cheap; does not invent fake durations. |
+| **Attribute** | IDs, model/provider, tokens, cost, status, retry count, tool name, Blackboard refs | Indexed, queryable, size-bounded. Never dump full diffs or prompts here at MVP. |
+| **Metric** | Counters/histograms: tokens, cost_usd, latency_ms, retries, validation_fail, tool_fail | Aggregates for dashboards (Prometheus from Phase 15). Not a substitute for traces. |
+| **Log** (`structlog`) | Human-readable diagnostics bound to `task_id` + `trace_id` | Debug when a span is not enough. Same correlation IDs. |
+
+Do **not** model every log line as a span. Do **not** inline full LLM prompts/completions into attributes at MVP (store Blackboard pointer `prompt_ref` / `output_ref` only if a later eval case needs them; Phase 15 may enable opt-in capture per experiment).
+
+### B.8.2 Span hierarchy (required parent/child)
+
+```
+TASK (task_id)
+ └── PHASE (phase)
+      └── MANAGER (manager_id)           # omitted for template-only steps
+           └── AGENT (agent_id)
+                ├── LLM_CALL (model_id, provider, tokens, cost)
+                ├── TOOL_CALL (tool_name, args_digest, result_status)
+                ├── VALIDATION (validator_id or masc, pass/fail)
+                └── [retry: sibling AGENT span with attempt_number++]
+      └── FAN_IN                          # implementation phase only
+      └── HITL                            # interrupt wait; duration = wall clock until resume
+```
+
+Parallel `Send` branches are sibling AGENT spans under the same MANAGER span. Fan-in is a sibling of those agents, not a child of one worker.
+
+### B.8.3 `TelemetrySink` Protocol (canonical interface)
+
+Implemented in `packages/common/telemetry.py`. The OTel SDK lives only in `packages/common/tracing.py` as `OtelTelemetrySink(TelemetrySink)`.
+
+```python
+from typing import Protocol, Iterator
+from contextlib import contextmanager
+from datetime import datetime
+from typing import Literal
+
+SpanKind = Literal[
+    "task", "phase", "manager", "agent",
+    "llm_call", "tool_call", "validation", "fan_in", "hitl", "sandbox",
+]
+
+class TelemetrySink(Protocol):
+    """Never raises. Never used for control flow."""
+
+    def start_span(
+        self,
+        *,
+        kind: SpanKind,
+        name: str,
+        task_id: str,
+        phase: str | None = None,
+        manager_id: str | None = None,
+        agent_id: str | None = None,
+        parent_span_id: str | None = None,
+        attributes: dict | None = None,
+    ) -> str: ...
+    """Returns span_id. No-op sink returns a dummy id."""
+
+    def end_span(
+        self,
+        span_id: str,
+        *,
+        status: Literal["ok", "error", "cancelled"],
+        error_type: str | None = None,
+        error_message: str | None = None,
+        attributes: dict | None = None,
+    ) -> None: ...
+
+    def emit_event(
+        self,
+        span_id: str,
+        *,
+        name: str,
+        attributes: dict | None = None,
+    ) -> None: ...
+
+    def record_metric(
+        self,
+        name: str,
+        value: float,
+        *,
+        unit: str,
+        attributes: dict | None = None,
+    ) -> None: ...
+
+    @contextmanager
+    def span(self, **kwargs) -> Iterator[str]: ...
+    """start_span / end_span with status=error on exception; does not swallow the exception."""
+```
+
+`emit_node_event(...)` from Phase 00 is kept as a **thin compatibility helper** that opens/closes a single span with the original fields (`task_id, node_id, agent_id, phase, model_id, input_tokens, output_tokens, cost_usd, latency_ms, validation_result`). New call sites (Phase 01+) use `TelemetrySink.span` / `start_span`. Do not grow `emit_node_event` with new parameters — extend attributes on `TelemetrySink` instead.
+
+### B.8.4 Required attributes (MVP)
+
+Always set when known. Empty/null allowed (sandbox-only spans in Phase 00).
+
+| Attribute | Span kinds | Notes |
+|---|---|---|
+| `task_id` | all | Same as `Task.id` / LangGraph `thread_id[:255]` |
+| `trace_id` | all | OTel trace id; bound into structlog |
+| `span_id` / `parent_span_id` | all | Parent/child |
+| `phase` | phase and below | `TaskState` value |
+| `manager_id` | manager and below | e.g. `implementation_manager` |
+| `agent_id` | agent and below | e.g. `codegen`, `validator.implementation` |
+| `operation` | llm_call | `(phase, operation)` key from §I.2 `CAPABILITY_REQUIREMENTS` |
+| `model_id` / `provider` | llm_call | From `ModelAdapter`, never hardcoded |
+| `input_tokens` / `output_tokens` / `cost_usd` | llm_call | From Phase 02 pricing registry, not provider cost fields |
+| `latency_ms` | timed spans | End − start |
+| `attempt_number` | agent, llm_call | Aligns with worker idempotency key (§D.9.8) |
+| `subtask_id` | agent (CodeGen) | Fan-out identity |
+| `tool_name` | tool_call | Exact registered tool id |
+| `tool_args_digest` | tool_call | Hash or redacted summary — never secrets (§B.6) |
+| `tool_status` | tool_call | ok / error / timeout |
+| `validation_result` | validation | pass / fail + flag_type if fail |
+| `artifact_ref` | events | Blackboard pointer, not payload |
+| `experiment_id` | task | Set only when a Phase 15 experiment run invokes the graph |
+
+### B.8.5 Orchestration adapter (LangGraph is an implementation detail)
+
+`packages/orchestration/telemetry_adapter.py` (Phase 01) wraps node functions:
+
+- On node entry: `start_span(kind="phase"| "manager"| "agent", ...)` and `update_task_state` (§D.2.1).
+- On node exit: `end_span`.
+- On `Send` fan-out: each branch span shares the manager parent; do not create a LangGraph-specific "Send span" kind.
+- On `interrupt()`: `start_span(kind="hitl")`; on `Command(resume=...)`: `end_span`.
+
+If the orchestrator is replaced, **only this adapter file changes**. `TelemetrySink`, §L evaluators, and UI `AgentEvent` mapping stay.
+
+`packages/model_adapters/telemetry.py` (Phase 02) records `llm_call` spans around every `ModelAdapter.complete` / `stream` / `call_tools` / `embed`. It must call `TelemetrySink`, not OTel directly.
+
+`BaseAgent.run()` (Phase 05) records the AGENT span, child LLM spans (via adapter), TOOL_CALL spans per tool, VALIDATION span for MASC.
+
+Fan-in Coordinator (Phase 06) records a FAN_IN span plus events: `overlap_detected`, `semantic_conflict`, `serialize_and_rerun`, `replan_triggered` — attributes are booleans/counts/subtask_ids, not diffs.
+
+### B.8.6 Correlation with existing stores
+
+| Data | Store | Telemetry role |
+|---|---|---|
+| Cost / tokens | `cost_tracking` (§R) | Duplicate of llm_call attributes; table remains source of truth for budget kill-switch |
+| HITL | `hitl_log` + `SDLCState.hitl_queue` (§D.7.1) | HITL span duration; do not score from spans |
+| WCP / escalations | `SDLCState` append-only lists | Event `wcp_emitted` with `subtask_id` |
+| Validation | `ValidationFlag` / MASC | VALIDATION span |
+| UI live view | `AgentEvent` / Redis pubsub | Mapped from sink callbacks in `emit_node_event` / adapter — one writer |
+
+Full trace retention target: 90 days. Episodic summaries: indefinite (§B.3). Not enforced in Phase 00.
+
+### B.8.7 Tool / research choices (observability only)
+
+| Tool | Role in *this* project | Decision |
+|---|---|---|
+| **OpenTelemetry Python** | Traces + (later) metrics export | **Adopt** as the sink implementation. GenAI semantic conventions: map our attributes onto `gen_ai.*` where they match (`gen_ai.request.model`, token usage); keep project attributes (`sdlc.phase`, `sdlc.agent_id`) as additional keys so evaluators do not depend on a moving spec. |
+| **OTLP** | Export protocol | **Adopt**. Dev: console exporter + optional OTLP to Langfuse. Prod: OTLP collector. |
+| **Langfuse (self-hosted)** | Optional trace UI | **Keep as optional backend**, not the contract. Do not call Langfuse SDK from agents. |
+| **LangSmith** | SaaS LangChain tracing | **Do not adopt.** Couples eval/obs to LangChain cloud; duplicates Langfuse. |
+| **Prometheus / Grafana** | Metrics dashboards | **Phase 15**, after `record_metric` has real volume. Not Phase 00. |
+| **DeepEval** | LLM-as-judge helpers | **Not a dependency.** Optional later for judge implementations behind our `Evaluator` protocol (§L.6). |
+| **MLflow** | Experiment tracking | **Not adopted.** Experiments live in Postgres (`evaluation_experiments`, §R) to avoid a second tracking stack. |
+| **OpenHands eval harness** | Benchmark methodology | **Borrow ideas only** (fixed tasks, scored diffs, pass@k). Do not import their runner. |
 
 ---
 
@@ -524,7 +699,7 @@ Ordered by real dependencies. Cannot build a workflow engine before agents exist
 
 | Phase                                  | Objective                                                    | Key Deliverables                                                                                                                                        | Dependencies     | Completion Criteria                                                                                                           |
 | -------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| **0 — Foundations**                    | Safety scaffolding before any agent writes code              | Task model (Pydantic); cost kill-switch; execution sandbox; OTel backbone; message queue scaffolding; secrets/config management                         | None             | Dummy task flows through intake → sandbox → trace log → budget-tracked completion with full audit trail                       |
+| **0 — Foundations**                    | Safety scaffolding before any agent writes code              | Task model (Pydantic); cost kill-switch; execution sandbox; `TelemetrySink` + OTel adapter; message queue scaffolding; secrets/config management        | None             | Dummy task flows through intake → sandbox → trace log → budget-tracked completion with full audit trail                       |
 | **1 — Orchestration Skeleton**         | Working LangGraph graph with durable state and one interrupt | Parent `StateGraph`; PostgreSQL checkpointer; interrupt/resume round-trip                                                                               | Phase 0          | Task paused for approval, process killed, resumes correctly from checkpoint. 100% across 20 crash trials                      |
 | **2 — Model Abstraction Layer**        | Model-independence structural from day one                   | `ModelAdapter` interface; GLM adapter; cost tracking callback; pricing registry                                                                         | Phase 0          | Zero provider-specific SDK calls outside `model_adapters/` (grep-verifiable)                                                  |
 | **3 — Minimal Repo Intelligence**      | Working retrieval at small scale before scaling              | Tree-sitter symbol index; Zoekt trigram search; git-diff incremental indexing; pgvector store                                                           | Phases 0, 2      | Retrieval precision@5 ≥ 90% on held-out labeled set; incremental update < 10s for 20-file commit                              |
@@ -539,7 +714,7 @@ Ordered by real dependencies. Cannot build a workflow engine before agents exist
 | **12 — Context Engineering**           | Token efficiency without accuracy loss                       | Budget math per phase; AST-boundary chunking; Aider-style PageRank repo map; Phase Handoff Packets                                                      | Phase 11         | Average tokens/task drops ≥ 40% vs. Phase 11 baseline with no drop in task success rate                                       |
 | **13 — Advanced QA**                   | Full QA capability stack                                     | Security (Semgrep + CodeQL); performance (k6/Locust); mutation testing; property-based testing; evidence bundles                                        | Phases 7, 10     | Security scan catches ≥ 95% of seeded-vulnerability benchmark                                                                 |
 | **14 — MCP & External Integrations**   | Connect to real engineering ecosystem                        | GitHub MCP; Jira MCP; Slack for HITL notifications; adapter pattern for missing servers                                                                 | Phase 8          | End-to-end: task from real ticket → human-approved PR, no manual data re-entry                                                |
-| **15 — Evaluation Framework**          | Measure real behavior                                        | Golden dataset; shadow-mode harness; DORA metrics; platform self-eval; feedback-loop health KPIs                                                        | Phases 5–14      | Golden-dataset resolution rate is a tracked, trending metric with documented baseline                                         |
+| **15 — Evaluation Framework**          | Measure real behavior                                        | `EvaluationEngine` + RunRecord; post-task KPIs; golden dataset; shadow-mode; experiment/baseline CI; DORA                                                                                | Phases 5–14      | Golden-dataset resolution rate is a tracked, trending metric with documented baseline; evaluators do not import LangGraph    |
 | **16 — Production Hardening**          | Prove every mitigation works                                 | Second model adapter (zero orchestration changes); induced Postgres HA failover test; queue load test; chaos tests                                      | All prior phases | Every §N risk row has a passing chaos test, not just a design                                                                 |
 
 
@@ -1872,7 +2047,7 @@ If the primary provider (GLM) is unavailable or error-rate exceeds threshold mid
 
 ## I.5 Cost & Token Tracking
 
-Callback handler logs usage per call. Versioned pricing registry (model → $/1M tokens in/out) normalizes cost across providers. Never rely on provider-reported cost fields alone — not consistently available across providers.
+`packages/model_adapters/telemetry.py` wraps every `ModelAdapter` call. It writes `cost_tracking` via `BudgetTracker` and opens an `llm_call` span on `TelemetrySink` (§B.8). Versioned pricing registry (model → $/1M tokens in/out) normalizes cost across providers. Never rely on provider-reported cost fields alone — not consistently available across providers. This module must not import OpenTelemetry; the sink implementation does.
 
 ---
 
@@ -2084,9 +2259,162 @@ The platform maintains its own regression suite — fixed historical tasks with 
 
 ## L.5 DORA Metrics as Business-Facing KPIs
 
-Deployment frequency, lead time for changes, change failure rate, MTTR — bridge from internal agent metrics to how engineering organizations already report on delivery.
+Deployment frequency, lead time for changes, change failure rate, MTTR — bridge from internal agent metrics to how engineering organizations already report on delivery. Computed in Phase 15 from `DeploymentRecord` + incident/rollback data. Not an agent-trajectory metric.
 
----
+## L.6 Evaluation must be decoupled from orchestration
+
+```
+TelemetrySink export + SDLCState + Postgres
+        ↓
+RunRecord / Trajectory  (packages/evaluation/trajectory.py)
+        ↓
+EvaluationEngine.evaluate(run)   # no LangGraph import
+        ↓
+Evaluator[]  →  Score + Evidence
+        ↓
+EvaluationResult  →  evaluation_results / evaluation_scores
+        ↓
+Experiment vs Baseline  →  regression gate
+```
+
+Evaluators read a **RunRecord**, never a LangGraph `StateGraph` or checkpoint blob. If checkpoint recovery is needed, a loader in `packages/evaluation/loaders/postgres.py` hydrates RunRecord from `tasks`, `cost_tracking`, `hitl_log`, `feedback_loop_events`, `evaluation_results`, Blackboard refs, and exported spans (OTLP JSON or a `span_export` table if added later). The loader is the only place that knows storage layout.
+
+### L.6.1 Canonical evaluation objects
+
+```python
+from typing import Literal, TypedDict
+from datetime import datetime
+
+class Evidence(TypedDict):
+    kind: Literal["metric", "artifact_ref", "span_id", "human_note", "judge_rationale"]
+    pointer: str                      # blackboard ref, span_id, or short literal
+    detail: str
+
+class Score(TypedDict):
+    metric_id: str                    # e.g. "system.cost_usd", "wcp.schema_complete"
+    value: float                      # 0–1 for rates; raw for cost/latency
+    unit: str
+    confidence: float | None          # required for LLM-judge metrics; 1.0 for deterministic
+    evidence: list[Evidence]
+
+class EvaluationCase(TypedDict):
+    case_id: str
+    work_type: str
+    repo_fixture: str                 # path under tests/fixtures or golden/
+    prompt: str
+    expected: dict                    # required_files, acceptance_criteria, known defects
+    labels: dict                      # risk_tier, methodology, tags
+
+class EvaluationDataset(TypedDict):
+    dataset_id: str
+    version: str                      # semver; bump when cases change
+    cases: list[EvaluationCase]
+
+class RunRecord(TypedDict):
+    """Hydrated after a task (live or golden replay) finishes. Evaluation input."""
+    task_id: str
+    experiment_id: str | None
+    agent_version: str                # git sha of platform
+    prompt_version: str               # hash of prompt pack
+    model_ids: list[str]
+    orchestration_version: str        # git sha; graph topology is not a LangGraph object here
+    evaluation_version: str           # evaluator code/config version
+    spans_ref: str | None             # optional export pointer
+    artifact_refs: list[str]
+    outcome: Literal["done", "blocked", "cancelled", "failed"]
+
+class EvaluationResult(TypedDict):
+    result_id: str
+    task_id: str
+    experiment_id: str | None
+    scores: list[Score]
+    scored_at: datetime
+
+class Experiment(TypedDict):
+    experiment_id: str
+    name: str
+    baseline_experiment_id: str | None
+    dataset_id: str
+    dataset_version: str
+    agent_version: str
+    prompt_version: str
+    model_ids: list[str]
+    notes: str
+    created_at: datetime
+```
+
+`Evaluator` is a Protocol: `evaluate(run: RunRecord, case: EvaluationCase | None) -> list[Score]`. Implementations live in `packages/evaluation/evaluators/`. No LLM call inside an evaluator unless its `method` is `llm_judge`.
+
+### L.6.2 Evaluation methods — when to use which
+
+| Method | Use when | Examples |
+|---|---|---|
+| **Deterministic** | Ground-truth exists in state/tools | Schema-valid WCP; ruff/mypy pass; `Task.state`; cost from `cost_tracking`; FL trigger counts; overlap flags from Fan-in events |
+| **Reference-based** | Golden case has expected files/tests | Fix Rate vs `expected.required_files`; spec checklist vs `RequirementsSpec.acceptance_criteria` |
+| **LLM-as-Judge** | Only when no objective check exists | Decomposition reasonableness; WCP "usefulness"; design coverage narrative |
+| **Human** | Irreversible policy, judge calibration, shadow-mode | Graduation (§L.3); judge disagreement review |
+
+Default: deterministic. LLM-as-Judge is opt-in per metric_id, must attach `Evidence.kind="judge_rationale"` and `Score.confidence`. Do not score "reasoning quality" as MVP.
+
+## L.7 Dimension catalog (MVP / Phase 2 / Advanced)
+
+Hierarchy: SYSTEM → PHASE → MANAGER → AGENT → TOOL/ACTION → COMMUNICATION → ENGINEERING OUTCOME.
+
+| Level | Dimension | Method | When |
+|---|---|---|---|
+| SYSTEM | Task success (`DONE` vs not) | Deterministic | **MVP** |
+| SYSTEM | Cost, cycle time, token totals | Deterministic (`cost_tracking`) | **MVP** |
+| SYSTEM | HITL count, rollback count | Deterministic | **MVP** |
+| SYSTEM | Retry rate, validation fail rate | Deterministic (spans + `feedback_loop_events`) | **MVP** |
+| SYSTEM | Recovery rate | Deterministic (FL resolved vs escalate) | **MVP** |
+| SYSTEM | Reliability / failure rate | Deterministic | **MVP** |
+| SYSTEM | Token efficiency, Fix Rate | Reference + formula (§L.1) | **MVP** |
+| PHASE | Phase completed, transition legal (§D.3) | Deterministic | **MVP** |
+| PHASE | Handoff packet present / under token cap | Deterministic | Phase 12+ data; **Phase 2** if packets exist |
+| PHASE | Unnecessary work (extra loops) | Deterministic counts | **Phase 2** |
+| MANAGER | Decomposition covers `ownership_map` files | Deterministic vs RI | **Phase 2** |
+| MANAGER | Circular deps rejected | Deterministic | **MVP** (assert on logs from Phase 06 §04 tests) |
+| MANAGER | Replan cap honored (≤1 per group) | Deterministic | **MVP** |
+| MANAGER | Fan-in never silent-merge | Deterministic (event) | **MVP** |
+| AGENT | Scope adherence (`touches_files` ⊆ ownership) | Deterministic | **Phase 2** |
+| AGENT | Attribution accuracy | Heuristic (§L.1) | **MVP** |
+| AGENT | Output schema (MASC Check 1) | Deterministic | **MVP** |
+| TOOL | Call success / timeout | Deterministic (tool_call spans) | **MVP** (once Phase 05 emits them) |
+| TOOL | Repeated identical calls | Deterministic | **Phase 2** |
+| TOOL | Argument correctness | Reference or judge | **Phase 2** / Advanced |
+| COMM | WCP schema complete | Deterministic | **MVP** |
+| COMM | Semantic conflict catch (zero file overlap) | Deterministic (Fan-in tests) | **MVP** as integration test; KPI in **Phase 2** |
+| COMM | WCP "usefulness" / assumption quality | LLM-judge | **Advanced** |
+| OUTCOME | Tests green, QA recommendation | Deterministic (`QAEvidence`) | **MVP** |
+| OUTCOME | Requirements satisfaction | Reference + Spec QA | **MVP** where Spec QA exists |
+| OUTCOME | Security/maintainability | Tool scores | **Phase 2** (Phase 13 data) |
+
+Trajectory relationship **Decision → Action → Result → Next decision** is reconstructed from parent/child spans + events (§B.8.2). MVP stores it; trajectory-level *scoring* (was this the right sequence?) is **Advanced** — do not block Phase 15 on it.
+
+## L.8 Experiment + baseline loop
+
+```
+Baseline Experiment (dataset D vN, platform sha A)
+   → Change prompt | model | graph adapter | agent code
+   → Same dataset D vN
+   → EvaluationEngine
+   → Diff scores vs baseline (per metric_id, per case_id)
+   → Fail CI if any MVP metric regresses beyond configured epsilon
+```
+
+Version fields on every experiment: `agent_version`, `prompt_version`, `model_ids`, `orchestration_version`, `evaluation_version`, `dataset_version`. Attribution of "which component caused the delta" is done by changing **one** of those fields per experiment. Do not change prompts and models in the same experiment if you need attribution.
+
+Shadow-mode graduation (§L.3) is an experiment type whose "expected" is the human decision, not a file diff.
+
+## L.9 Evaluator reliability (Advanced — do not build in Phase 15 MVP)
+
+Judge consistency (same case twice), inter-judge agreement, calibration against human labels. Document as research; ship only after golden dataset has ≥ the sample size used for confidence recalibration. Until then, LLM-judge metrics are unofficial and cannot gate CI.
+
+## L.10 What evaluation consumes vs what it must not
+
+**May read:** `TelemetrySink` exports, `cost_tracking`, `hitl_log`, `feedback_loop_events`, `QAEvidence`, `ImplementationResult`, WCP/ClarificationEscalation lists, Blackboard artifacts, `Task`, golden `EvaluationCase.expected`.
+
+**Must not read:** LangGraph checkpoint internals, `AgentEvent` as a scoring source (UI-only), live model calls except inside an explicit `llm_judge` evaluator, telemetry to *drive* a running task.
 
 
 
@@ -2200,8 +2528,8 @@ The reflection output is appended to the draft before it enters `Validator`(desi
 | **HTTP client**          | httpx                               | 0.27+         | Async; HTTP/2                                         |
 | **Model adapters**       | LangChain BaseChatModel             | 0.3+          | Structured output, tools, streaming for free          |
 | **LiteLLM**              | Optional normalization layer        | latest        | If GLM endpoint has OpenAI compatibility gaps         |
-| **Tracing**              | OpenTelemetry SDK                   | 1.25+         | Per-node spans; cost tracking                         |
-| **Agent observability**  | Langfuse (self-hosted)              | 2.x           | Agent trace visualization; token cost per agent       |
+| **Tracing**              | OpenTelemetry SDK                   | 1.25+         | Implements `TelemetrySink` only; OTLP export          |
+| **Agent observability**  | Langfuse (self-hosted, optional)    | 2.x           | OTLP backend for humans — not the eval contract       |
 | **Metrics**              | Prometheus                          | 2.52+         | System and agent metrics                              |
 | **Dashboards**           | Grafana                             | 10.x          | KPI dashboards; alerting                              |
 | **Logging**              | structlog                           | 24.x          | Structured JSON; same OTel pipeline                   |
@@ -2251,6 +2579,8 @@ class AgentEvent(TypedDict):
     timestamp: str
     agent_id: str
     phase: str
+    span_id: str | None               # correlates to TelemetrySink span (§B.8); UI-only
+    parent_span_id: str | None
     event_type: Literal[
         "agent_started", "agent_tool_call", "agent_tool_result",
         "agent_token_stream", "agent_completed", "agent_failed",
@@ -2263,7 +2593,7 @@ class AgentEvent(TypedDict):
     payload: dict
 ```
 
-`AgentEvent` is **strictly observational** — a projection of already-committed state changes for the UI, OTel trace stream, and audit logs. It exists only for logging, tracing, metrics, debugging, and auditability.
+`AgentEvent` is **strictly observational** — a projection of `TelemetrySink` spans/events plus already-committed state changes, for the UI and audit logs. It is not an evaluator input (§L.10).
 
 **Hard rule:** no graph node, Manager, Fan-in Coordinator, Validator, or policy function may read `AgentEvent` or `SDLCState.agent_events` to decide routing, scheduling, planning, or replanning. Events are write-only from the orchestration layer's perspective. Control-flow inputs are exclusively:
 
@@ -2289,10 +2619,13 @@ sdlc-platform/
 │
 ├── packages/
 │   ├── common/                   # Shared: Task model, config, security utils
+│   │   ├── telemetry.py          # TelemetrySink Protocol (§B.8.3) — no OTel import
+│   │   └── tracing.py            # OtelTelemetrySink + structlog correlation
 │   │
 │   ├── orchestration/            # LangGraph graphs, nodes, state schemas
 │   │   ├── state.py              # SDLCState TypedDict + all reducers
 │   │   ├── dag_constructor.py    # Single orchestrator StateGraph; WorkflowProfile flags drive conditional edges (§D.2)
+│   │   ├── telemetry_adapter.py  # LangGraph → TelemetrySink only (§B.8.5)
 │   │   ├── feedback.py           # FeedbackReport schema + loop registry
 │   │   ├── masc.py               # MASCEngine (3-check pipeline)
 │   │   ├── intent_tracker.py     # IntentTracker
@@ -2305,7 +2638,7 @@ sdlc-platform/
 │   │       └── enterprise.py
 │   │
 │   ├── agents/
-│   │   ├── base.py               # BaseAgent (retry, MASC integration, OTel)
+│   │   ├── base.py               # BaseAgent (retry, MASC, TelemetrySink spans)
 │   │   ├── templates/
 │   │   │   ├── approval_gate.py  # ApprovalGate template
 │   │   │   └── validator.py      # Validator template
@@ -2372,7 +2705,7 @@ sdlc-platform/
 │   │   ├── registry.py
 │   │   ├── glm/
 │   │   │   └── adapter.py        # GLM-4.7 + GLM-4.7-Flash
-│   │   └── telemetry.py          # UsageTelemetry + OTel spans
+│   │   └── telemetry.py          # UsageTelemetry → TelemetrySink llm_call spans + BudgetTracker
 │   │
 │   ├── workflow_engine/          # Routing rules (§F)
 │   │   ├── policy.py             # resolve_workflow_profile()
@@ -2394,11 +2727,17 @@ sdlc-platform/
 │   │   ├── property_tester.py
 │   │   └── evidence_collector.py
 │   │
-│   ├── evaluation/               # Evaluation framework (§L)
-│   │   ├── pipeline.py           # EvaluationPipeline (post-task)
+│   ├── evaluation/               # Evaluation framework (§L) — no LangGraph imports
+│   │   ├── engine.py             # EvaluationEngine
+│   │   ├── pipeline.py           # post-task score() ARQ job
+│   │   ├── trajectory.py         # RunRecord hydration helpers
+│   │   ├── loaders/
+│   │   │   └── postgres.py       # tasks + cost + hitl + FL events → RunRecord
+│   │   ├── evaluators/           # Evaluator Protocol implementations
 │   │   ├── fix_rate.py
 │   │   ├── attribution.py
 │   │   ├── feedback_loop_health.py
+│   │   ├── experiments.py        # baseline diff, CI gate
 │   │   └── benchmarks/
 │   │       ├── golden_dataset.py
 │   │       └── shadow_mode.py
@@ -2515,6 +2854,7 @@ CREATE TABLE cost_tracking (
 CREATE TABLE evaluation_results (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     task_id         VARCHAR(255) REFERENCES tasks(id),
+    experiment_id   UUID,
     fix_rate        FLOAT,
     token_efficiency FLOAT,
     hitl_count      INTEGER,
@@ -2523,6 +2863,33 @@ CREATE TABLE evaluation_results (
     cost_usd        NUMERIC(10,6),
     attribution_accuracy FLOAT,
     recorded_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE evaluation_scores (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    result_id       UUID REFERENCES evaluation_results(id),
+    task_id         VARCHAR(255) REFERENCES tasks(id),
+    metric_id       VARCHAR(200) NOT NULL,
+    value           FLOAT NOT NULL,
+    unit            VARCHAR(50),
+    confidence      FLOAT,
+    evidence        JSONB,
+    recorded_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE evaluation_experiments (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            VARCHAR(255) NOT NULL,
+    baseline_id     UUID,
+    dataset_id      VARCHAR(255) NOT NULL,
+    dataset_version VARCHAR(50) NOT NULL,
+    agent_version   VARCHAR(64),
+    prompt_version  VARCHAR(64),
+    model_ids       JSONB,
+    orchestration_version VARCHAR(64),
+    evaluation_version VARCHAR(64),
+    notes           TEXT,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE regression_history (
@@ -2566,6 +2933,7 @@ CREATE TABLE feedback_loop_events (
 CREATE INDEX idx_tasks_state        ON tasks(state);
 CREATE INDEX idx_tasks_risk_tier    ON tasks(risk_tier);
 CREATE INDEX idx_cost_task_id       ON cost_tracking(task_id);
+CREATE INDEX idx_eval_scores_metric ON evaluation_scores(metric_id);
 CREATE INDEX idx_hitl_request_type  ON hitl_log(request_type) WHERE responded_at IS NULL;
 CREATE INDEX idx_regression_module  ON regression_history(module_path);
 CREATE INDEX idx_design_modules     ON design_decisions USING GIN(module_paths);
@@ -2623,7 +2991,7 @@ CREATE INDEX idx_feedback_task      ON feedback_loop_events(task_id, loop_id);
 - Planning Manager + Requirements Analyst + Confidence Scorer + `Validator`(requirements) (Phase 5)
 - `interrupt()` HITL gates + `ApprovalGate` template (Phase 8)
 - MASC engine (3-check pipeline) (runs from Phase 5 onward)
-- OTel instrumentation (Phase 0)
+- `TelemetrySink` + OTel adapter (failure-isolated) (Phase 0)
 - FastAPI + WebSocket event streaming (Phase 8)
 - UI Screens 1–4, 7–8 (Phase 9)
 
@@ -2640,7 +3008,7 @@ CREATE INDEX idx_feedback_task      ON feedback_loop_events(task_id, loop_id);
 - Phase Handoff Packets + context compression pipeline (Phase 12)
 - Semgrep (inline QA) + mutmut + Hypothesis (Phase 13)
 - GitHub MCP + Jira MCP + Slack MCP (Phase 14)
-- Evaluation pipeline + Fix Rate + Feedback Loop Health KPIs (Phase 15)
+- EvaluationEngine + RunRecord loaders + MVP KPIs + experiment/baseline CI (Phase 15)
 - RBAC enforcement + audit log
 - UI Screens 5–6, 9–11 (Phase 9)
 
@@ -2652,7 +3020,8 @@ CREATE INDEX idx_feedback_task      ON feedback_loop_events(task_id, loop_id);
 - CodeQL periodic deep scans (Phase 13)
 - Performance QA (k6/Locust) + Accessibility QA (axe-core) + API contract fuzzing (schemathesis) (Phase 13)
 - GitLab MCP + custom adapter base (Phase 14)
-- Golden dataset + shadow-mode graduation harness (Phase 15)
+- Golden dataset + shadow-mode graduation harness (Phase 15; can start assembling cases earlier)
+- LLM-as-Judge evaluators behind `Evaluator` protocol (optional; not CI-gating)
 - Platform self-evaluation regression suite (Phase 15)
 - pgvector → Qdrant migration (Phase 16)
 - UI Screen 12 (Phase 9)
