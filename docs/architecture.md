@@ -139,11 +139,13 @@ User/Ticket ──▶ Intake Subgraph ──▶ Requirements Subgraph ──▶ 
                                                                     │
                                                                     ▼
                                                           Implementation Subgraph
-                                                          (Send → CodeGen × N, each branch:
-                                                           CodeGen → Validator(implementation);
-                                                           Fan-in Coordinator: deterministic
-                                                           overlap + WCP conflict check;
-                                                           Integration Validator on merged diff)
+                                                          (Topology Selector → ExecutionPlan;
+                                                           Wave Scheduler loops over waves;
+                                                           per wave: Send → CodeGen × wave.width,
+                                                           each branch: CodeGen → Validator(impl);
+                                                           Fan-in Coordinator per wave: overlap +
+                                                           WCP conflict → WaveHandoffNote;
+                                                           Integration Validator after final wave)
                                                                     │
                                                                     ▼
                                                               QA Subgraph
@@ -193,16 +195,20 @@ Full detail in §E of the blueprint; summarized here for orientation.
 
 ### 5.1 Communication Architecture Summary
 
-Full detail in §D.9 of the blueprint. One invariant governs everything else in this subsection: **workers never talk to workers** (Principle 9, §A.2). Parallel workers remain intentionally unaware of siblings; cross-branch knowledge is assembled only at Fan-in — improving determinism, auditability, reproducibility, and deadlock avoidance.
+Full detail in §D.9 / §D.4 / §D.10. **Workers never talk to workers.** Cross-worker knowledge is assembled only at Fan-in (per wave) via WCP → optional demotion/amendment → `WaveHandoffNote`.
 
-- **Worker Coordination Packet (WCP, §B.2/§D.9.2)** — every parallel worker emits one structured self-report (assumptions, discovered dependencies, interface changes, confidence) on branch exit, produced as part of its normal output rather than a second LLM call. This is what the Fan-in Coordinator uses to catch assumption drift that a raw diff wouldn't surface.
-- **Fan-in Coordinator (§D.4.1)** — a deterministic graph node, *not* an agent or LLM call. Runs after all branches pass per-branch `Validator(implementation)`. Detects file-level and WCP-based semantic overlap (§D.4.1.1), decides merge vs. serialize-and-rerun (§D.4.4), and is the only thing authorized to trigger a bounded (≤1 per group per attempt) Manager replan.
+- **Topology Selector / TP-01…TP-08 / Wave Scheduler** — **not LLM calls.** One Manager structured decompose; selector is Python in the same node (§D.10.11). Happy-path Implementation LLM count vs V3.0 is unchanged: 1 Manager + N CodeGen + 1 Integration Validator. TP-02 width gate is confidence `< 0.70`; §B.4 Implementation floor `0.75` is model-tier escalation — keep both. `WorkflowProfile.execution_order` is a hotfix/scheduling preference gate, not `ExecutionPlan.topology_class`.
+- **Wave Scheduler** — sole mechanical `Send` issuer; Manager holds coordination authority only (§D.9.5).
+- **WCP** — every worker exit report (`plan_version`, `wave_index`); input to Fan-in and handoff projection.
+- **Fan-in** — per-wave boundary: overlap, semantic conflict, cross-wave check, merge (`merge_eligible`), demotion SM, amendment, handoff, advance.
+- **Active plan ≠ history** — demotion rewrites remaining schedule and adds `demotion_ignore_keys`; append-only results are never rewritten.
 - **`Validator(implementation)` (§D.4.0)** — runs per Send branch before Fan-in; tool-only static analysis. Failures route via FL-04 to the originating CodeGen sub-agent.
 - **ClarificationEscalation protocol (§D.9.3)** — when a worker's assumptions break mid-task, it consults Repository Intelligence first, then stops its own branch and escalates (never guesses, never messages a peer). The Manager resolves the batch from design docs + RI; HITL is reached only for genuine requirement/scope/policy ambiguity.
 - **ReplanContext (§B.2/§D.5)** — every replan (Feedback Agent, Fan-in-triggered, or otherwise) is handed structured history of prior attempts, so each attempt is strictly better-informed, never a blind re-run.
-- **Explicitly rejected (§D.9.7):** worker↔worker messaging, swarm/debate/voting for core workflow, always-on coordination windows, recursive worker spawning, and an LLM-driven Merge Resolution Agent — merge conflicts are resolved deterministically by the Fan-in Coordinator (serialize-and-rerun), never by a separate merge agent or model call.
+- **Explicitly rejected (§D.9.7):** worker↔worker messaging, swarm/debate/voting for core workflow, always-on coordination windows, recursive worker spawning, and an LLM-driven Merge Resolution Agent — merge conflicts are resolved by the Fan-in **wave demotion** state machine (§D.4.4), never by a merge agent or extra model call.
 - **Idempotent workers (§D.9.8):** every parallel worker must tolerate retries, checkpoint replay, and resume without duplicate side effects.
-- **Pre-dispatch overlap check (§D.4.2):** Implementation Manager may adjust decomposition before `Send()` when RI reveals obvious file overlap — Fan-in remains final authority.
+- **Pre-dispatch overlap (§D.4.2):** superseded by Topology Selector + Fan-in. The Manager does not `Send` and does not run a second overlap LLM. File overlap becomes blocking SDG edges or Fan-in demotion.
+- **Merge eligibility:** `merge_eligible` = `status==validated` and attempt not in `demotion_ignore_keys`. Results are append-only; demotion never rewrites status.
 - **`AgentEvent` observational only (§B.8, §P):** never used for routing, scheduling, planning, or replanning. Not an evaluation scoring source.
 - **Telemetry is orchestrator-independent (§B.8):** LangGraph talks to `TelemetrySink` via `telemetry_adapter.py`. Evaluators consume `RunRecord`, not graph nodes.
 - **Task ↔ graph sync (§D.2.1):** `Task.state` in Postgres is the durable phase source of truth; updated on graph node entry. `SDLCState` does not carry `task_state`.

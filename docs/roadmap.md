@@ -15,7 +15,7 @@ This is the master index. It converts `final_plan.md` Part C (the blueprint's ow
 | [03](phases/phase-03/README.md) | Minimal Repository Intelligence  | 6                 | 00, 02             | Working retrieval at small scale before scaling.                                 |
 | [04](phases/phase-04/README.md) | Dynamic Requirements Engine      | 4                 | 03                 | Adaptive clarification loop, not a checklist.                                    |
 | [05](phases/phase-05/README.md) | Planning & Intake Agents         | 6                 | 01, 02, 04         | Wire the Questioning Engine into a real, running intake graph.                   |
-| [06](phases/phase-06/README.md) | Design & Implementation Agents   | 7                 | 05                 | Design-driven, validated code generation with parallel fan-out.                  |
+| [06](phases/phase-06/README.md) | Design & Implementation Agents   | 7                 | 05                 | Design-driven code generation with dynamic topology (PARALLEL/SEQUENTIAL/HYBRID) via Topology Selector, Wave Scheduler, and wave-aware Fan-in. |
 | [07](phases/phase-07/README.md) | Core QA Agents                   | 5                 | 06                 | Incremental, impact-scoped QA and bug validation.                                |
 | [08](phases/phase-08/README.md) | HITL & Release Governance        | 5                 | 01, 07             | Real approval gates and a real PR flow — nothing merges without them.            |
 | [09](phases/phase-09/README.md) | Minimal UI                       | 6                 | 08                 | Make the whole system legible to a human.                                        |

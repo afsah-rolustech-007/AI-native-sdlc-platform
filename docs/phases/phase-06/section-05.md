@@ -1,67 +1,51 @@
-# Section 05 — CodeGen Sub-agents & Parallel Fan-Out
+# Section 05 — CodeGen Workers, Wave Scheduler & Send Dispatch
 
 ## Objective
 
-Implement the CodeGen sub-agent (§E.8: implements one module/scope per instance) and wire LangGraph's `Send` API to fan out N parallel instances per `TaskDecomposition`'s parallel groups — producing the platform's first real code diffs, executed inside Phase 00's sandbox.
+Implement CodeGen workers and the **Wave Scheduler** (§D.4.0 / §D.4.0.1 / §D.9.5): the sole graph node allowed to return LangGraph `Send` for CodeGen. PARALLEL / SEQUENTIAL / HYBRID are plan shapes only — one scheduler loop.
 
 ## Why It Exists
 
-This is the phase's central value-delivery mechanism. Parallel fan-out is what makes the platform's throughput scale with independent work rather than serializing everything — but it's also the first place genuine LangGraph mechanics (the `Send` API, fan-out/fan-in state merging) meet genuinely risky operations (executing generated code). Both halves need to be right together.
+LangGraph needs a static compiled graph with dynamic `Send` fan-out. The Scheduler reads the active `ExecutionPlan`, dispatches one wave, waits for Fan-in, then re-enters or exits to Integration Validator.
 
 ## Expected Architecture
 
-`packages/agents/implementation/codegen_agent.py`'s `CodeGenAgent(BaseAgent)` takes one `TaskDecomposition` sub-task, uses progressive context expansion tools (§H.4 — `get_symbol_signature`, `get_symbol_body`, `get_callers`, `get_file_structure`, all from Phase 03, exposed as agent tool calls per §E.3's "Specialized Retrieval" for CodeGen) to gather only what it needs, generates a diff, and self-checks it (a lightweight, in-agent sanity pass) before returning. Model tier is Fast for simple modules, High-capability for complex refactors (§E.8) — the tier decision itself is a per-sub-task input from the Implementation Manager's decomposition (a reasonable heuristic: sub-task description/scope size), refined later by Phase 10's real routing. The `implementation` graph node uses `Send(codegen_node, {...sub_task...})` per parallel group in `TaskDecomposition.execution_order`, running true concurrent LangGraph branches; each branch runs its diff generation inside Phase 00's sandbox, writing only to its isolated worktree per §D.4.3.
+### Wave Scheduler (`packages/orchestration/wave_scheduler.py`)
 
-**Canonical per-branch sequence (§D.4.0):** each `Send` branch runs `CodeGen → Validator(implementation)` before Fan-in. Section 07 implements the Validator node and wires it as the immediate successor of CodeGen within each branch subgraph. Only branches that pass static validation append an `ImplementationResult(status="validated")` and become eligible for Fan-in merge.
+- Reads `current_wave_index`, `execution_plan`.
+- Returns `[Send(codegen_branch, payload)…]` for ids in `waves[current_wave_index]` (honour `dispatch_concurrency ≤ width`).
+- Payload includes subtask spec + current `WaveHandoffNote` (if any) + plan_version/wave_index.
+- After Fan-in advances index: `Command(goto=wave_scheduler)` or route to Integration Validator when done.
+- **Not an LLM. Not a Worker.** Holds mechanical dispatch privilege only (§D.9.5).
+- `compact_at_wave_close`: **no-op in Phase 06**; Phase 12 wires T2/T3. Must not change topology.
 
-**Every branch closes with a `WorkerCoordinationPacket` (§B.2/§D.9.2), not just a diff.** On successful CodeGen exit (before or alongside validation), the agent's structured output includes the WCP fields (`assumptions`, `discovered_dependencies`, `interface_changes`, `risks`, `touches_files`, `confidence`, `needs_manager_attention`) alongside the diff — same model call, no extra round-trip. If the agent hits something Repository Intelligence can't resolve and its assumptions genuinely break, it emits a `ClarificationEscalation` (§B.2/§D.9.3) instead, sets `WorkerCoordinationPacket.blocked=true`, and **stops its own branch** — it does not guess, and it does not attempt to contact another CodeGen branch (there is no mechanism by which it could; §D.9.1). Section 06's Fan-in Coordinator is the sole consumer of both.
+### CodeGen
 
-**Idempotent worker contract (§D.9.8):** every CodeGen branch must safely tolerate LangGraph retries, interrupt/resume, and checkpoint replay. Before performing sandbox writes or git mutations, the worker checks whether `(task_id, subtask_id)` already has a completed diff + WCP in state/Blackboard; if so, return the existing result unless the Manager explicitly redispatched with revised instructions. Duplicate execution for the same inputs must not produce duplicate commits, duplicate artifacts, or duplicate WCP entries.
+`CodeGenAgent` — progressive RI tools (§H.4); isolated worktree (§D.4.3); emits diff + WCP (`plan_version`, `wave_index`); ClarificationEscalation path; idempotent under `(task_id, subtask_id, plan_version, attempt_number)`.
+
+Per-branch: `CodeGen → Validator(implementation)` before Fan-in (§D.4.0).
+
+Base commit: wave 0 → `task_base_sha`; later waves / demotion redispatches → integration HEAD at dispatch time.
 
 ## Dependencies
 
-Section 04 (`TaskDecomposition`), Phase 00 §04 (sandbox), Phase 03 (progressive context tools).
+Section 04 (`ExecutionPlan`), Phase 00 sandbox, Phase 03 RI tools.
 
 ## Atomic Implementation Tasks
 
-1. Implement `CodeGenAgent`'s tool-calling loop using the progressive context expansion tools from §H.4 — start with minimal context (Level 0 architecture summary only) and let the agent request more via tool calls, rather than force-injecting full file contents up front.
-2. Implement diff generation and self-check (a lightweight in-agent review, distinct from the reflection pass in Section 02 — keep it cheap, this runs per sub-task, potentially many times per task).
-3. Implement git isolation per §D.4.3: one worktree per `(task_id, subtask_id)` at `{repo}/.sdlc/worktrees/{task_id}/{subtask_id}/`, integration worktree at `{repo}/.sdlc/worktrees/{task_id}/integration/`, branch naming `sdlc/{task_id}/{subtask_id}` — no ad-hoc alternatives.
-4. Wire the `Send` API fan-out in the `implementation` node: for each parallel group in `execution_order`, dispatch one `Send(codegen_branch, sub_task)` per sub-task. Each branch subgraph is `codegen_node → validator_implementation_node` (§D.4.0). LangGraph native fan-in aggregates validated `ImplementationResult` entries into `SDLCState.implementation_results` (the `append_only` reducer from Phase 01 §01).
-5. Run each CodeGen sub-agent's actual code execution/testing (if any at this stage — even a basic "does it parse/import" self-check) inside Phase 00's sandbox, tagged with the sub-task's identity for trace correlation.
-6. Implement `WorkerCoordinationPacket` emission as part of the agent's structured output schema (§M.1), and the `ClarificationEscalation` early-exit path (consult RI first via the progressive-context tools; only escalate if still blocked) — write both to `SDLCState.worker_coordination_packets`/`clarification_escalations` (`append_only`) and reference the diff/logs via the Section 04 `BlackboardService`'s `store()`.
-7. Integration test: the demo feature's 2–3 sub-tasks dispatch as real parallel `Send` branches (verified via trace timestamps showing overlapping execution, not accidental serialization), each producing a real diff against its isolated worktree, each with a well-formed `WorkerCoordinationPacket`.
-8. Integration test: deliberately craft a sub-task whose module doesn't exist / whose assumed interface is wrong, confirm the agent consults RI first (`ri_consulted=true`), then emits a `ClarificationEscalation` and stops its branch cleanly rather than guessing or producing a diff against a false assumption.
-9. Integration test: simulate checkpoint replay / node retry for a completed subtask and confirm the worker returns the existing result without duplicate git writes or duplicate WCP emission (idempotency, §D.9.8).
-
-## Manual Testing Procedure
-
-1. Run the demo feature's Implementation phase and observe (via OTel traces) that independent sub-tasks' CodeGen agents genuinely overlap in execution time.
-2. Inspect each generated diff for correctness against the design's stated requirements for that module.
-3. Confirm each CodeGen agent's tool-call trace shows progressive expansion (starts minimal, requests more only as needed) rather than being handed the whole file upfront.
-
-## Expected Demo
-
-Terminal/trace output showing 2+ CodeGen sub-agents running concurrently (overlapping timestamps), each producing a diff, followed by a `git diff` view of the isolated worktrees before fan-in merges them.
+1. WaveSchedulerNode with Send + loop + termination.
+2. CodeGen tool loop + WCP schema fields including plan_version/wave_index.
+3. Git isolation contract §D.4.3.
+4. Tests: sequential plan; parallel plan; hybrid plan; idempotent replay; Scheduler refuses ids not in active wave; no Send from CodeGen.
 
 ## Acceptance Criteria
 
-- [ ] Independent sub-tasks demonstrably execute in parallel (not accidentally serialized), verified via trace timing.
-- [ ] Each CodeGen agent uses progressive context expansion (tool-call-driven), not eager full-context injection.
-- [ ] Generated diffs are produced against isolated, task-scoped git worktrees — no direct writes to a shared working tree from concurrent agents.
-- [ ] Every CodeGen execution runs inside Phase 00's sandbox, correctly attributed in traces.
-- [ ] Every CodeGen branch (success or blocked) emits a schema-valid `WorkerCoordinationPacket`; a blocked branch's escalation shows `ri_consulted=true` before stopping.
-- [ ] CodeGen worker is idempotent under simulated retry/checkpoint replay — no duplicate side effects (§D.9.8).
+- [ ] Only Wave Scheduler returns CodeGen `Send`.
+- [ ] Width-1 waves use the same code path as wide waves.
+- [ ] Next wave sees integration HEAD + WaveHandoffNote, not raw sibling diffs.
+- [ ] Idempotency keys include `plan_version`.
 
 ## Risks
 
-- **Risk:** Git worktree/branch management under real concurrency is a source of subtle bugs (race conditions, stale base commits). **Mitigation:** keep the isolation strategy as simple as possible at this phase (e.g., one worktree per sub-task, cleaned up after fan-in) and treat any observed race as a priority fix — this mechanism is reused by every future implementation task, so its correctness compounds in importance.
-
-## Future Improvements
-
-- `max_parallel_impl_agents` capping by repo scale (§F.2) — Phase 10.
-- Richer self-check (actual test execution per sub-task, not just parse/import checks) — Phase 07 QA agents build on top of this, but a stronger CodeGen-level self-check is a reasonable later enhancement.
-
-## Research Opportunities
-
-Compare CodeGen output quality/first-pass-acceptance rate between Fast and High-capability tiers on the same sub-task types, once enough real runs exist — directly informs whether the Implementation Manager's tier-assignment heuristic (task 1's per-sub-task input) needs revision ahead of Phase 10's formalization.
+- Recursion limit vs wave height — set per §D.4.0.1.
+- Checkpoint growth — Blackboard pointers only in state.

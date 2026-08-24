@@ -1,65 +1,67 @@
-# Section 04 — Implementation Manager & Task Decomposition
+# Section 04 — Implementation Manager, Topology Selector & Blackboard
 
 ## Objective
 
-Implement the Implementation Manager (§E.8): decomposes an approved `ArchitectureDoc` into a `TaskDecomposition` (§B.2) — a set of module-scoped sub-tasks with dependency-aware execution ordering — using `RepositoryIntelligence`'s `get_dependencies`/`get_dependents` to detect circular dependencies and resolve overlapping ownership before dispatch.
+Implement the Implementation Manager (§E.8): decomposes an approved `ArchitectureDoc` into a `TaskDecomposition` (§B.2) — WHAT + `declared_dependencies` — then invokes the deterministic Topology Selector (`plan_execution_waves()`, §D.10.3) to produce the active `ExecutionPlan` and `TopologyDecisionRecord`. Also introduce the minimal `BlackboardService` (§D.9.4).
 
 ## Why It Exists
 
-This is the coordination layer that makes Section 05's parallel fan-out safe: deciding *what* can run in parallel (independent modules) versus *what* must run sequentially (dependent modules) is a real graph-analysis problem, not a guess. Getting this wrong either serializes everything unnecessarily (slow) or parallelizes things that conflict (Section 06's problem to catch, but better avoided at the source here).
+The Manager must not silently be the scheduler, and must not spend extra LLM rounds pretending to be RI. **One High-capability structured-output call** produces `TaskDecomposition` (WHAT: subtasks, `target_files`, `declared_dependencies`, `model_tier_hint`). **Zero tools on that call.** Then the same graph node runs `plan_execution_waves()` in Python (WHEN). TP-01…TP-08 are YAML-driven deterministic policy, not model decisions (§D.10.3.1, §D.10.11).
 
 ## Expected Architecture
 
-`packages/agents/implementation/implementation_manager.py`'s `ImplementationManager(BaseAgent)` runs at High-capability tier, takes the approved `ArchitectureDoc` + `RequirementsSpec`, and produces `TaskDecomposition` (`tasks: [{id, description, module, dependencies}]`, `execution_order: [[parallel_group],...]`, `ownership_map: {module_path: sub_agent_id}`). It calls `get_dependencies`/`get_dependents` (Phase 03) per affected module to build the real dependency ordering, and explicitly checks for circular dependencies (fail loudly — a circular dependency between proposed sub-tasks is a design decomposition bug) and overlapping ownership (two sub-tasks claiming the same file/module — resolved by merging into one sub-task before dispatch, not discovered later at fan-in).
+`ImplementationManager(BaseAgent)` (High-capability) produces `TaskDecomposition` in **one** structured-output invocation. Prompt context is injected (ArchitectureDoc, Design→Implementation handoff, L0 summary). **Do not** attach `get_dependencies` / `get_callers` as Manager tools on this call — that creates a hidden ReAct tax.
 
-**Pre-dispatch overlap check (§D.4.2):** immediately before calling `Send()` for any parallel group, the Manager runs one deterministic, zero-LLM validation: compare `ownership_map`, planned file sets (via RI file index), and dependency graph for sub-tasks in the same parallel group. If obvious file-level overlap is detected, adjust decomposition (merge sub-tasks or move one to a later sequential group) before dispatch. This is an optimization only — Phase 06 §06's Fan-in Coordinator remains the final authority for overlap and conflict detection after workers execute.
+Forbidden Manager outputs: `topology_class`, waves, `max_wave_width`, `confidence_score`, `risk_tier`. Complexity, if present, may only set `model_tier_hint` (Fast vs High per subtask).
 
-This section also introduces the minimal `BlackboardService` (`packages/orchestration/blackboard.py`, §D.9.4: `store`/`retrieve`/`exists`, Postgres-backed) — it must exist before Section 05's CodeGen sub-agents produce their first real diffs, since diffs and any `WorkerCoordinationPacket.artifact_refs`/`ClarificationEscalation.evidence_refs` are stored here rather than inlined into `SDLCState`. Pointers use format `{task_id}/{kind}/{uuid}` (§D.4.3). Fail-Closed behavior on store/retrieve failure is defined in §D.9.4. Phase 08 enriches this same service, it does not originate it.
+**Topology Selector** — `plan_execution_waves(decomposition, sdg, profile, ctx, task)` in the **same node** after the LLM returns:
 
-**Manager Authority (§D.9.5):** the Implementation Manager is the *only* node in this phase authorized to call `Send` (dispatch), redistribute a sub-task between workers, or trigger a replan. CodeGen sub-agents (Section 05) never do any of these — a blocked sub-agent raises a `ClarificationEscalation` and stops; only this Manager redispatches. Keep this boundary explicit in the node wiring, not just in agent prompts.
+1. Seed / RI-verify SDG (budget §D.10.7); cycle → replan path, never dispatch.
+2. Apply TP hard gates then soft min-caps (§D.10.3) using exact inputs:
+   - `task.risk_tier`, `task.confidence_score`
+   - `ctx.repo_scale`, `ctx.max_parallel_impl_agents`
+   - `profile.max_parallelism`
+   - `sdg.ri_available`
+3. Levelize; width-cap split; derive `topology_class` per §D.10.3 exact rules.
+4. Write `SDLCState.execution_plan`, `plan_version`, `topology_decisions`.
+
+**Pre-dispatch overlap check (§D.4.2)** is superseded by the Selector — do not implement both.
+
+**Manager authority (§D.9.5):** coordination only (decompose / replan / reassign). Mechanical `Send` is Wave Scheduler (Section 05).
+
+**BlackboardService** — `store`/`retrieve`/`exists`, Postgres JSONB; pointer format `{task_id}/{kind}/{uuid}`.
 
 ## Dependencies
 
-Section 03 (approved, validated `ArchitectureDoc`), Phase 03 (`RepositoryIntelligence` graph queries).
+Section 03 (approved `ArchitectureDoc`), Phase 03 (RI). Until Phase 10: `WorkflowProfile.most_conservative()` and a local `WorkflowContext` subset with `repo_scale` from file-count heuristic (default `medium` if unknown — never default `small`).
 
 ## Atomic Implementation Tasks
 
-1. Implement `TaskDecomposition` schema per §B.2 as the Implementation Manager's output.
-2. Implement the decomposition prompt/logic: given the architecture's `component_boundaries`, propose one sub-task per independently-implementable unit.
-3. Implement dependency-graph cross-checking: for each proposed sub-task, call `get_dependencies`/`get_dependents` on its target module(s) and validate the proposed `execution_order` is consistent with real, actual code dependencies (not just the LLM's guess) — this is the section's core "ground the plan in reality" step, same philosophy as Section 01's Repo Architecture Analyst.
-4. Implement circular-dependency detection (topological sort failure → reject and retry decomposition, or escalate if retries exhausted) and overlapping-ownership resolution (merge sub-tasks claiming the same file).
-5. Implement the pre-dispatch overlap check (§D.4.2): before `Send()`, compare planned file ownership across sub-tasks in each parallel group using RI — adjust decomposition if obvious overlap detected; otherwise proceed.
-6. Implement the real `implementation` graph node's entry logic (decomposition step only — fan-out is Section 05).
-7. Implement `BlackboardService` (`store`/`retrieve`/`exists`, §D.9.4) as a thin Postgres JSONB-backed service; wire it in as a dependency the Implementation Manager and (Section 05's) CodeGen sub-agents both receive, not a global singleton reached for implicitly.
-8. Implement `ReplanContext` (§B.2) assembly: given a `task_id`, aggregate prior `TaskDecomposition`, `worker_coordination_packets`, `clarification_escalations`, and `feedback_reports` from `SDLCState` into the structured replan input — this is exercised for real starting Section 07, but the assembly function belongs here alongside the Manager it feeds.
-9. Integration test: the demo feature request (touching 2–3 interdependent files) produces a `TaskDecomposition` whose `execution_order` correctly serializes the dependent pair and parallelizes the independent one.
-10. Integration test: deliberately craft a decomposition with two sub-tasks in the same parallel group claiming overlapping files and confirm the pre-dispatch check merges or reschedules them before any `Send()` call.
-
-## Manual Testing Procedure
-
-1. Run the demo feature through Implementation Manager; print the full `TaskDecomposition`.
-2. Manually verify the `execution_order` against the demo repo's actual dependency structure (cross-check with Phase 03's `get_dependencies` output directly).
-3. Deliberately craft a design that would produce circular sub-task dependencies and confirm the Implementation Manager detects and rejects/retries rather than producing an invalid plan.
-
-## Expected Demo
-
-Terminal output of `TaskDecomposition` for the demo feature, with an explicit call-out of which sub-tasks are grouped for parallel execution and which are sequential due to real dependency edges — cross-referenced against a printed `get_dependencies` call proving the ordering is grounded, not guessed.
+1. `TaskDecomposition` schema per §B.2 — **no** `execution_order` field.
+2. Decomposition prompt: one sub-task per unit + explicit `declared_dependencies`.
+3. `plan_execution_waves()` pure function + injected RI adapter — unit tests for TP-01…TP-08, topology_class derivation, cycle detection, RI-unavailable.
+4. RI verification + query budget cap (§D.10.7).
+5. `BlackboardService` + `ReplanContext` assembly including `previous_plan`, `completed_wave_indices`, `discovered_edges`.
+6. Integration test: hybrid soft-delete Users example from §D.10.3.
+7. Integration test: CRITICAL → all width 1 (TP-03); RI down → TP-01 sequential.
 
 ## Acceptance Criteria
 
-- [ ] `TaskDecomposition.execution_order` is verified consistent with real dependency-graph data for the demo feature.
-- [ ] Circular dependencies among proposed sub-tasks are detected and never silently passed through to dispatch.
-- [ ] Overlapping file/module ownership across sub-tasks is resolved (merged) before dispatch, not left for fan-in to discover.
-- [ ] Pre-dispatch overlap check (§D.4.2) prevents obvious same-group file overlap from reaching `Send()` — verified by a dedicated test distinct from the fan-in overlap test in Section 06.
+- [ ] Active schedule comes from `ExecutionPlan`. Manager output has no `execution_order`.
+- [ ] TP hard/soft semantics match §D.10.3; CRITICAL is width 1; TP-02 uses **0.70** (not §B.4's 0.75).
+- [ ] `profile.execution_order == "sequential"` → width 1; field is not `topology_class`.
+- [ ] `TopologyDecisionRecord.policy_rules_fired` / `width_cap_source` populated.
+- [ ] Cycles never dispatched.
+- [ ] Trace of happy-path decompose shows **exactly one** High-capability `llm_call` span before Wave Scheduler; Topology Selector / Fan-in / Scheduler spans have no `model_id`.
+- [ ] Manager decompose call has **zero** RI tool_call children.
+- [ ] TP evaluation loads `configs/topology_policy.yaml`; unit tests swap YAML and get different `max_wave_width` without any model.
 
 ## Risks
 
-- **Risk:** Decomposition granularity is a real judgment call — too coarse loses parallelism benefit, too fine creates excessive coordination overhead and increases the chance of subtle cross-sub-task interface mismatches. **Mitigation:** no hard rule is prescribed; treat this as something to observe and tune per §E.2's principle ("sub-agents only where tool or context requirements genuinely differ" — apply the same discipline to task granularity).
+- Decomposition granularity vs coordination overhead — observe; tune with Phase 15 topology KPIs.
+- `repo_scale` heuristic before Phase 10 — document; default medium.
 
 ## Future Improvements
 
-- Dependency-fan-out-aware `max_parallel_impl_agents` capping by repo scale (§F.2) — Phase 10, once `WorkflowContext` is fully wired.
-
-## Research Opportunities
-
-Once several real decompositions exist, examine whether LLM-proposed sub-task boundaries tend to align with or diverge from the real dependency graph — informs whether the Implementation Manager should be given the dependency graph *before* proposing decomposition (current design) vs. proposing first and reconciling after (alternative worth comparing).
+- Full `WorkflowContext` from Phase 10.
+- Tier-C historical topology calibration (Phase 15+).

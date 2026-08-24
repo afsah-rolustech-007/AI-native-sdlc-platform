@@ -2,53 +2,64 @@
 
 ## Objective
 
-Implement the real Aider-style PageRank repo map (§H.2): compute PageRank over the codebase's import/reference graph, and inject a top-K files/symbols map as Level 0.5 context — replacing Phase 03 §06's simple raw-in-degree placeholder.
+Implement the real Aider-style **Personalized PageRank** repo map (§H.2): from task goal/input → seed set → PPR over the import/reference graph → top-K files+signatures as Level 0.5 context — replacing Phase 03 §06's simple raw-in-degree placeholder.
 
 ## Why It Exists
 
-Phase 03 explicitly deferred this, using in-degree as a documented stand-in. PageRank differs meaningfully from raw in-degree: a file referenced by a few highly-important files should rank higher than one referenced by many unimportant ones — exactly the signal that matters for giving an agent a token-efficient sense of "what matters most" before it retrieves anything specific.
+Phase 03 deferred this, using in-degree as a stand-in. Global “most important files in the repo” is the wrong product: agents need files relevant to **this** goal. Personalized PageRank teleports back to a task seed set, so rank mass concentrates in the structural neighborhood of the ticket/grep hits/prior edits — not on globally popular utilities. That is the signal that gives a token-efficient “what matters for this task” before any body retrieval.
 
 ## Expected Architecture
 
-`packages/repo_intel/summaries/repo_map.py` computes PageRank over the dependency graph (now Neo4j-backed at scale, Phase 11 §03 — using Neo4j's Graph Data Science library if available, or exporting the relevant subgraph for offline PageRank computation via NetworkX/`networkx.pagerank` if that's simpler and sufficiently performant at the per-shard scale this needs to run at). `get_aider_repo_map(scope)` (§G.6's interface, already declared since Phase 03 §06) is re-implemented against real PageRank scores, producing a top-K files/symbols map with signatures, injected as Level 0.5 context (after architecture summary, before progressive expansion) per §H.2's exact injection order.
+`packages/repo_intel/summaries/repo_map.py` implements §H.2 end-to-end:
+
+1. **SeedCollection** from Context Builder inputs (explicit paths, grep/glob hits, prior-wave/WCP files, impact/localisation hints, L0 fallback) with source weights (§H.2.2).
+2. **Personalized PageRank** on the per-shard dependency subgraph (Neo4j GDS if available, else NetworkX `pagerank(personalization=v)`), α=0.85 (§H.2.3).
+3. **Render** top-K files packed to `budget_tokens` with Tree-sitter signatures only (§H.2.4).
+4. **`get_aider_repo_map(...)`** returns `RepoMap`; Context Builder injects it as L0.5 per §H.2.5 / §M.2 (after architecture summary, before Phase Handoff Packet and progressive expansion).
+
+Cache key: `(shard_graph_version, frozenset(seeds), α, agent_phase)`. Rebuild on new wave, new WCP targets, or graph version bump — not on every tool call.
 
 ## Dependencies
 
-Phase 11 §03 (Neo4j graph to compute PageRank over at scale), Phase 03 §06 (the interface/placeholder being replaced).
+Phase 11 §03 (Neo4j graph at scale), Phase 03 §06 (interface/placeholder being replaced), Phase 05 context assembly / system prompt template (injection order).
 
 ## Atomic Implementation Tasks
 
-1. Implement PageRank computation over the import/reference graph, scoped per-shard (running PageRank over the full federated graph at once is unnecessary and expensive — scope it to the relevant shard(s) for a given query, consistent with Phase 11's federation design).
-2. Implement `get_aider_repo_map(scope)` producing the top-K files/symbols by PageRank score, with signatures (reusing Phase 03 §01's Tree-sitter symbol data), targeting the blueprint's stated ~1,000–3,000 token cost.
-3. Wire the repo map into every agent's context assembly at Level 0.5, per §M.2's context injection order (architecture summary, then repo map, then Phase Handoff Packet, then task-specific retrieved context) — update the system prompt template (Phase 05 §03) to reflect this ordering explicitly if it wasn't already structured this way.
-4. Unit tests: PageRank scores are correctly computed and produce a sensible top-K ranking for the fixture/demo repo (spot-checked against known important files, e.g., a central config or shared utility module should rank highly).
-5. Replace all call sites still using Phase 03 §06's placeholder implementation.
+1. Implement `SeedCollection` builder (or accept pre-built seeds from Context Builder) with S1–S5 sources and weights exactly as §H.2.2.
+2. Implement PPR over the import/reference graph, scoped to shard(s) covering the seeds (+ k-hop closure) — never full federated graph.
+3. Re-implement `get_aider_repo_map(scope, *, seeds, budget_tokens, agent_phase, ...)` to return packed top-K files/symbols by PPR score (~1,000–3,000 tokens default; respect phase budgets).
+4. Wire Context Builder so every agent prompt gets L0.5 in §M.2 order; workers personalize on WCP `target_files`; Design/Impl Manager use task-level seeds; QA uses diff + impact seeds (§H.2.5 table).
+5. Add score cache keyed by graph version + seeds; invalidate from Phase 03 §05 incremental index triggers.
+6. Unit tests: known fixture seeds pull the expected neighborhood into top-K (not merely global hubs); token estimate stays in band; placeholder call sites removed.
 
 ## Manual Testing Procedure
 
-1. Compute the repo map for the demo repo and manually review the top-K files for plausibility (do the genuinely central/important files rank highly?).
-2. Compare the PageRank-based ranking against Phase 03's raw in-degree placeholder ranking for the same repo, noting where they differ and why.
-3. Confirm the repo map's token cost falls within the blueprint's stated ~1,000–3,000 token target.
+1. Pick a concrete demo goal (e.g. “add revoke_session to AuthService”). Build seeds from goal text + one grep sweep; print top-K and confirm auth/session modules dominate over unrelated high-degree utils.
+2. Compare three rankings on the same repo: Phase 03 in-degree, global PageRank (no personalization), personalized PageRank — note where PPR correctly promotes seed-neighborhood files.
+3. Confirm L0.5 token cost within budget; confirm worker map differs from manager map when WCP targets are a subset.
 
 ## Expected Demo
 
-A side-by-side printed comparison: Phase 03's placeholder ranking vs. this section's real PageRank ranking for the same repo scope, with a brief explanation of any meaningful difference (e.g., a widely-but-shallowly-referenced file dropping in rank versus a deeply-central one rising).
+Side-by-side: (a) in-degree placeholder, (b) global PageRank, (c) personalized PageRank for one task seed set — with a one-paragraph explanation of which files moved and why that helps the agent.
 
 ## Acceptance Criteria
 
-- [ ] PageRank is computed correctly over the real dependency graph (verified by spot-checking known-important files rank appropriately).
-- [ ] `get_aider_repo_map()` output token cost falls within the ~1,000–3,000 token target.
-- [ ] The repo map is injected at Level 0.5, in the correct order, across all agents built in Phases 05–10.
-- [ ] Phase 03 §06's placeholder implementation is fully replaced, with no remaining call sites.
+- [ ] PPR uses a non-uniform personalization vector derived from task seeds (§H.2.2), not uniform global PageRank alone.
+- [ ] `get_aider_repo_map()` output token cost falls within the configured budget band (~1,000–3,000 default).
+- [ ] L0.5 is injected in the correct order across agents from Phases 05–10; workers seed from WCP targets.
+- [ ] Phase 03 §06 placeholder is fully replaced; cache invalidates on graph version bump.
+- [ ] Spot-check: seed-neighborhood files outrank unrelated global hubs for the demo task.
 
 ## Risks
 
-- **Risk:** PageRank computed over a very large federated graph could itself become an expensive operation if not properly scoped per-shard. **Mitigation:** the explicit per-shard scoping decision (task 1) is the direct mitigation — measure computation time and treat any surprising cost as a signal to narrow scope further, not to abandon PageRank for something cruder.
+- **Risk:** PPR over a large shard is expensive if under-scoped. **Mitigation:** seed + k-hop closure only; measure; narrow k before abandoning PPR.
+- **Risk:** Noisy grep seeds pollute the map. **Mitigation:** lower S2 weight, cap seed count at 12, prefer S1/S3 when present.
 
 ## Future Improvements
 
-- Caching PageRank scores with incremental updates (rather than full recomputation) tied to Phase 03 §05's incremental indexing triggers — a reasonable optimization once real recomputation cost is measured.
+- Incremental PPR updates tied to Phase 03 §05 index triggers (avoid full recompute).
+- Optional symbol-level PPR for dense files once file-level packing is stable.
 
 ## Research Opportunities
 
-Compare agent performance (design/implementation quality, first-pass acceptance rate) with the repo map present versus absent, on a controlled set of tasks — directly quantifies the map's value, beyond just "it's a proven technique elsewhere" (Aider's own reported results, cited by the blueprint, but worth validating in this platform's specific agent context).
+Ablate: no map vs global PageRank vs personalized PageRank on the same task set — measure first-pass module localisation accuracy and tokens/task (supports Phase 12’s ≥40% token reduction gate).

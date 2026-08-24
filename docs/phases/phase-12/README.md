@@ -2,7 +2,7 @@
 
 ## Goal
 
-Reduce token consumption per task by at least 40% versus the Phase 11 baseline, with no drop in task success rate — by implementing the full context budget math (§H.1), the 5-step compression pipeline (§H.3), the Aider-style PageRank repo map (§H.2) replacing Phase 03's placeholder, and real, token-capped Phase Handoff Packets (§B.5) replacing the raw artifact-passing used since Phase 05.
+Reduce token consumption per task by at least 40% versus the Phase 11 baseline, with no drop in task success rate — by implementing the full context budget math (§H.1), the 5-step compression pipeline (§H.3), the personalized Aider-style PageRank repo map (§H.2: goal → seeds → PPR → L0.5) replacing Phase 03's placeholder, and real, token-capped Phase Handoff Packets (§B.5) replacing the raw artifact-passing used since Phase 05.
 
 ## Why This Phase Exists
 
@@ -22,22 +22,21 @@ Every agent's context assembly (BaseAgent.build_context(), used since Phase 05)
         │
         ▼
   Level 0: Architecture summary (unchanged since Phase 03 §06)
-  Level 0.5: Aider-style PageRank repo map (§H.2) ── REPLACES Phase 03's placeholder
+  Level 0.5: Personalized PageRank repo map (§H.2) ── goal/seeds → PPR → top-K; REPLACES Phase 03's placeholder
         │
         ▼
   Progressive context loading (§H.4) ── tool-based expansion, already used by
         │                                CodeGen since Phase 06 §05; now budget-aware
         ▼
-  5-Step Compression Pipeline (§H.3) ── only engaged when over budget:
-        1. Structural filtering (free)
-        2. Deduplication (free)
-        3. AST-boundary skeletal compression (free)
-        4. LRU eviction (free)
-        5. LLM summarization (fast model, last resort)
+  5-Step Compression Pipeline (§H.3) + tiered layout (§H.6) ── only engaged when over budget:
+        T0 stable prefix (never)
+        T1 Context Ledger + current WaveHandoffNote (never compressed)
+        T2 working window (clear at wave boundary / 40% pressure)
+        T3 anchored compacted history (wave boundary / 70% pressure)
+        T4 Blackboard pointers
         │
         ▼
-  Phase Handoff Packet (§B.5) ── REPLACES raw artifact-passing since Phase 05;
-        now token-capped per transition, pointer-based for full detail
+  Phase Handoff Packet (§B.5) + wave→wave WaveHandoffNote (2,000 tokens)
 ```
 
 ## Expected Live Demo
@@ -47,9 +46,9 @@ Run the Phase 06 demo feature (or an equivalent representative task) twice again
 ## Deliverables
 
 - `packages/context_engine/budget.py`, `builder.py`, `compressor.py`, `handoff_packet.py`.
-- Real Aider-style PageRank repo map, replacing Phase 03's heuristic placeholder.
+- Real **personalized** Aider-style PageRank repo map (seeded from task goal/input), replacing Phase 03's heuristic placeholder.
 - Real, token-capped `PhaseHandoffPacket` at every phase transition.
-- Before/after token efficiency benchmark.
+- `compact_at_wave_close` wired from Fan-in (replaces Phase 06 no-op stub; §D.4.0.1 / §H.6).
 
 ## Sections
 

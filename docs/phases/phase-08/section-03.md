@@ -8,7 +8,7 @@ Implement the Review Manager (§E.8: coordinates diff review against design + st
 
 QA (Phase 07) verifies correctness and spec compliance; Review verifies the diff is *well-formed* against the design and coding standards — a genuinely different lens (style, architectural fit, maintainability) that QA's tools don't cover.
 
-**Merge and conflict handling is not part of Review.** All overlap detection, merge eligibility, serialize-and-rerun, and replan triggering belong exclusively to Phase 06 §06's **Fan-in Coordinator** (§D.4.1) — a deterministic graph node, not an agent. There is no Merge Conflict Resolver agent anywhere in the architecture. Review receives an already fan-in-merged diff; it does not re-resolve conflicts.
+**Merge and conflict handling is not part of Review.** All overlap detection, merge eligibility, wave demotion, and replan triggering belong exclusively to Phase 06 §06's **Fan-in Coordinator** (§D.4.1) — a deterministic graph node, not an agent. There is no Merge Conflict Resolver agent anywhere in the architecture. Review receives an already fan-in-merged diff; it does not re-resolve conflicts.
 
 ## Expected Architecture
 
@@ -17,10 +17,10 @@ QA (Phase 07) verifies correctness and spec compliance; Review verifies the diff
 The canonical implementation flow (§D.4.0):
 
 ```
-Implementation Manager
-  → [Send] CodeGen × N (parallel, isolated worktrees)
+Implementation Manager (WHAT) → Topology Selector → Wave Scheduler [Send]
+  → CodeGen × wave.width (isolated worktrees)
        each branch: CodeGen → Validator(implementation) [per-branch, tool-only]
-  → Fan-in Coordinator → Integration Validator
+  → Fan-in Coordinator (per wave) → … → Integration Validator (once)
 ```
 
 Review sits **after** QA on the merged artifact — it never intercepts merge/conflict decisions.

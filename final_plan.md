@@ -54,6 +54,33 @@ Both prior blueprints represent serious engineering work. V3 is not a merge — 
 | 6   | **Monitoring → spawns new Task, never loops back** | AI-Native correctly identified this. V3 makes it a design axiom: production incidents get fresh risk/confidence assessment, not an assumption that the original task's context still applies                                                                                   |
 
 
+## 0.3 Revision 3.1 — Development-Phase Execution Topology
+
+V3.0 specified the Development (Design + Implementation) phase as **parallel-first**: the Implementation Manager decomposes work and (in V3.0) fans out N concurrent CodeGen workers via `Send`, closed by a deterministic Fan-in Coordinator. Revision 3.1 generalizes this to **runtime-selected execution topology** — parallel, sequential, or hybrid — for the Development phase only, and moves mechanical `Send` exclusively to the Wave Scheduler (§D.9.5). No other phase changes.
+
+The change is small in *shape*: V3.0 already fanned out CodeGen workers. What V3.0 lacked was a first-class `ExecutionPlan` (waves + `max_wave_width` + derived `topology_class`) and a deterministic planner. `TaskDecomposition.execution_order` is **removed** — the Manager must not emit a schedule.
+
+| #   | Decision | Rationale |
+| --- | -------- | --------- |
+| 7   | **One wave-based executor, not three topology modes** (§D.10.1) | Parallel = one wave of width N. Sequential = N waves of width 1. Hybrid = anything else. `topology_class` is a *derived label*, never an input that switches code paths. Three executors would mean three fan-in semantics, three retry paths, three sets of bugs. |
+| 8   | **Topology is chosen by a deterministic function over a dependency graph, not by an LLM** (§D.10.3) | Principle 5 applied to scheduling. The Manager (LLM) decides *what* the sub-tasks are; `plan_execution_waves()` (pure, unit-testable) decides *when* each runs. Matches the precedent set by `resolve_workflow_profile()` (§F.3). |
+| 9   | **Parallelism is a function of subtask independence, not task complexity** (§D.10.2) | Complexity enters only indirectly — a harder task yields more sub-tasks with more dependency edges, which naturally produces a deeper, narrower wave DAG. There is no "complex → sequential" rule anywhere in the design. |
+| 10  | **Plan width is separated from dispatch concurrency** (§D.10.4) | The plan states which sub-tasks *may* run together; runtime backpressure decides how many actually run at once. This keeps the plan reproducible (required for golden-dataset evaluation, §L.8) while still respecting fleet capacity. |
+| 11  | **Plan amendment (deterministic, cheap) is distinguished from replan (LLM, bounded)** (§D.10.5) | A runtime-discovered dependency that only constrains *not-yet-dispatched* sub-tasks is resolved by re-levelizing the graph — no model call, no Manager pass. Only a broken decomposition escalates to a bounded Manager replan. Without this split, "adaptive topology" would be an unbounded cost feature. |
+| 12  | **Amendments may only narrow, never widen** (§D.10.5) | Each amendment strictly adds blocking edges, so the amendment loop provably terminates (edge count is bounded by n²) and the audit trail never has to explain a decision to re-parallelize work it had already serialized. |
+| 13  | **WCP is retained and generalized, not replaced** (§D.9.2) | WCP was *motivated* by parallelism, but its payload (discovered dependencies, interface changes, touched files) is topology-independent — and is strictly *more* load-bearing under sequential/hybrid execution, because it is the mechanism by which wave K's discoveries reach wave K+1. Two fields added (`wave_index`, `plan_version`); nothing removed. |
+| 14  | **`WaveHandoffNote` — intra-phase handoff, assembled deterministically** (§D.10.6) | The sequential/hybrid analogue of `PhaseHandoffPacket`. Assembled by the Fan-in Coordinator by union/dedup/truncate over completed WCPs — still zero LLM calls in Fan-in. This is the *only* new communication artifact, and it is a projection of existing state, not a new channel. |
+| 15  | **Worker→worker communication remains forbidden in every topology** (§D.9.1) | Sequential execution raises the temptation ("A is done, just hand B its output"). That is precisely what a `WaveHandoffNote` does — with provenance, a token cap, and a conflict check. A direct channel would add nondeterminism, unbounded context growth, and a deadlock class that currently cannot exist. |
+| 16  | **Worker-spawned sub-agents rejected for MVP and Phase 2; bounded delegation is evidence-gated** (§D.10.8) | The problem it would solve (a sub-task too large for one worker) is already solved at zero architectural cost: the worker raises `ClarificationEscalation(category="scope_ambiguity")` and the Manager re-decomposes into the next wave. |
+| 17  | **Context Ledger — critical facts are never compressed, because they are never in the compressible tier** (§H.5) | Rather than hoping a summarizer preserves decisions and constraints, they are extracted into a small, typed, append-only fact table with provenance pointers. Compression operates on the raw trajectory; the ledger is lossless by construction. |
+| 18  | **TP policy is two-phase: hard gates then soft min-caps** (§D.10.3) | First-match exclusive hard gates force width=1 when independence cannot be trusted. Soft caps then take `min(...)` of all matching conservatism rules and `WorkflowProfile`/`WorkflowContext` bounds. Removes undefined `manager_suggestion` and the CRITICAL width contradiction. |
+| 19  | **Active `ExecutionPlan` ≠ historical execution record** (§D.4.4) | Demotion rewrites the *active* remaining schedule. Telemetry/`topology_decisions` retain what was attempted. Never leave a conflicting `[A,B]` wave as a live re-executable plan entry. |
+| 20  | **Wave demotion: supersede-all-conflict-members, then serialize by deterministic order** (§D.4.4) | No silent winner-merge of a conflicting pair. Both (all) conflict members are superseded; a total order is computed; blocking edges are added; remaining plan is amended; redispatches use integration HEAD after each successful predecessor merge. |
+| 21  | **Send is issued only by Wave Scheduler; Managers own coordination authority** (§D.9.5) | Manager decides WHAT and may replan. Topology Selector decides WHEN. Wave Scheduler is the sole graph node allowed to return `Send` for CodeGen. Workers never dispatch. |
+| 22  | **Implementation-phase LLM budget: one Manager structured call; topology is Python** (§D.10.11) | Four named layers must not imply four model calls. Happy-path extra LLMs vs V3.0: **zero**. Manager does not ReAct-query RI. Selector does bounded deterministic RI. TP rules are config-driven deterministic policy, never an LLM. |
+
+**Terminology introduced in 3.1 (used consistently across every document):** `ExecutionPlan`, `ExecutionWave`, `wave_index`, `plan_version`, `topology_class`, `SubtaskDependencyGraph` (SDG), `TopologyDecisionRecord`, `WaveHandoffNote`, `plan amendment` vs. `replan`, `wave demotion`, `Context Ledger`, `hard gate` vs. `soft cap` (TP rules).
+
 ---
 
 
@@ -76,7 +103,8 @@ A reliable, semi-autonomous AI Software Engineering platform that orchestrates t
 6. **Model- and tool-independence is structural.** Enforced via adapter interfaces, not convention.
 7. **Incremental over big-bang.** Useful on a 500-file repo on day one; scales to 1M+ files by strengthening the same architecture.
 8. **Fail-Closed by Default.** Any internal scoring, policy, or validation mechanism that errors, times out, or returns malformed output routes the task toward *more* human oversight, never toward *more* autonomy. A broken Confidence Scorer does not default to "assume high confidence" — it defaults to "require approval." This applies uniformly across every Part of this document.
-9. **Intentional worker isolation.** Parallel workers are deliberately unaware of sibling workers. Cross-worker knowledge is delayed until Fan-in, never exchanged mid-flight. This is not a limitation — it is what preserves determinism, auditability, reproducibility, reasoning quality, deadlock avoidance, and safe parallelism at scale. The communication invariant (§D.9.1) is the operational expression of this principle; Fan-in is where intentional cross-branch knowledge is first assembled.
+9. **Intentional worker isolation.** Concurrently-running workers are deliberately unaware of each other. Cross-worker knowledge is delayed until Fan-in, never exchanged mid-flight. This is not a limitation — it is what preserves determinism, auditability, reproducibility, reasoning quality, deadlock avoidance, and safe parallelism at scale. The communication invariant (§D.9.1) is the operational expression of this principle; Fan-in is where intentional cross-branch knowledge is first assembled. **This principle is topology-independent (§D.10):** under sequential and hybrid execution, a later worker receives an earlier worker's findings through the `WaveHandoffNote` assembled at Fan-in (§D.10.6) — never through a direct channel, and never by reading another worker's in-flight state.
+10. **Execution shape follows dependency structure, not difficulty.** How much of the Development phase runs in parallel is determined by measured independence between sub-tasks — file, symbol, interface, and shared-resource dependencies read from Repository Intelligence — never by a judgment that a task "feels complex." The scheduling decision itself is a deterministic, unit-testable function (§D.10.3), consistent with Principle 5.
 
 
 
@@ -152,7 +180,7 @@ class TaskBudget(BaseModel):
 class ApprovalRecord(BaseModel):
     checkpoint: str
     approver: str
-    decision: str            # approve | reject_with_feedback | request_changes
+    decision: str            # approve | reject_with_feedback | request_changesSun
     evidence_ref: str        # Blackboard pointer, not inlined
     timestamp: datetime
 
@@ -211,23 +239,122 @@ class ArchitectureDoc(TypedDict):
     approved_at: datetime | None
 
 class TaskDecomposition(TypedDict):
-    tasks: list[dict]                 # [{id, description, module, dependencies}]
-    execution_order: list[list[str]]  # [[parallel_group], ...]
-    ownership_map: dict[str, str]     # {module_path: sub_agent_id}
+    """WHAT the work is. Produced by the Implementation Manager (LLM). It states the
+    sub-tasks, their scopes, and their *declared* dependencies. It does NOT decide the
+    schedule — that is `ExecutionPlan`, produced deterministically from this by
+    `plan_execution_waves()` (§D.10.3)."""
+    tasks: list[dict]                 # [{id, description, module, target_files, declared_dependencies, model_tier_hint}]
+    ownership_map: dict[str, str]     # {module_path: subtask_id}
+    version: int                      # incremented on every Manager replan (§D.10.5)
+    # V3.0 `execution_order` is REMOVED. Do not emit it. The scheduler ignores any leftover field.
+
+class SubtaskDependencyEdge(TypedDict):
+    """One typed, evidence-bearing reason why two sub-tasks are related. Every edge cites
+    where it came from — there are no unsourced edges, because an unsourced edge cannot be
+    audited or evaluated for 'was this serialization necessary?' (§L.7)."""
+    from_subtask: str
+    to_subtask: str                   # from_subtask must complete before to_subtask
+    kind: Literal[
+        "produces_interface",         # to_ consumes a symbol from_ creates/changes
+        "file_overlap",               # both claim the same file
+        "symbol_overlap",             # both claim the same symbol
+        "shared_resource",            # same DB entity, migration, proto, config, lockfile
+        "build_order",                # generated/compiled artifact ordering
+        "test_coupling",              # shared fixture or suite
+        "declared",                   # Manager asserted it; not yet RI-verified
+        "discovered",                 # added at runtime from a WCP or escalation (§D.10.5)
+    ]
+    blocking: bool                    # True → forces wave ordering. False → advisory only.
+    evidence: str                     # RI query name + result digest, or WCP/escalation id
+    source: Literal["manager_declared", "repo_intelligence", "runtime_discovery"]
+    confidence: float                 # 1.0 for deterministic RI/structural facts
+
+class SubtaskDependencyGraph(TypedDict):
+    """Nodes are subtask_ids from TaskDecomposition; edges are SubtaskDependencyEdge.
+    Built once per plan_version, amended incrementally (§D.10.5). Never rebuilt from a
+    full repository scan — see §D.10.7's query budget."""
+    nodes: list[str]
+    edges: list[SubtaskDependencyEdge]
+    plan_version: int
+    ri_available: bool                # False → Fail-Closed to fully sequential (§D.10.9)
+
+class ExecutionWave(TypedDict):
+    """One dispatch group. All members are mutually independent under the blocking edges
+    of the SDG at this plan_version."""
+    wave_index: int                   # 0-based, monotonic within a plan_version
+    subtask_ids: list[str]
+    width: int                        # len(subtask_ids); 1 == this wave is sequential
+    rationale: str                    # why these are co-scheduled / why the wave was split
+
+class ExecutionPlan(TypedDict):
+    """WHEN the work runs. The single object that expresses parallel, sequential, and
+    hybrid execution — there is no separate 'mode'. Produced by plan_execution_waves()
+    (§D.10.3); consumed by the Wave Scheduler node (§D.4.0)."""
+    plan_version: int
+    task_id: str
+    waves: list[ExecutionWave]
+    topology_class: Literal["sequential", "parallel", "hybrid"]  # DERIVED, never an input
+    max_wave_width: int               # policy cap actually applied (§D.10.4)
+    dispatch_concurrency: int         # runtime cap; ≤ max_wave_width. Does NOT change plan shape.
+    dependency_graph: SubtaskDependencyGraph
+    created_from: Literal["initial_plan", "amendment", "replan"]
+    superseded_plan_version: int | None
+
+class TopologyDecisionRecord(TypedDict):
+    """Why this plan has this shape. Written once per plan_version. Evaluation (§L.7)
+    scores this object. UI: Screen 6 timeline + Screen 3 profile; there is no Screen 13."""
+    decision_id: str
+    task_id: str
+    plan_version: int
+    topology_class: Literal["sequential", "parallel", "hybrid"]
+    subtask_count: int
+    wave_count: int
+    widths: list[int]                             # width per wave
+    blocking_edge_count: int
+    advisory_edge_count: int
+    features: dict                                # static feature snapshot (§D.10.2 Tier A)
+    policy_rules_fired: list[str]                 # e.g. ["TP-08"] or ["TP-03"]
+    width_cap_source: str                         # canonical string, see §D.10.3 final-width formula
+    fail_closed_reason: str | None                # set when RI/feature collection failed
+    created_from: Literal["initial_plan", "amendment", "replan"]
+    created_at: datetime
+
+class WaveHandoffNote(TypedDict):
+    """Intra-phase handoff: what waves 0..K produced that wave K+1 must know. The sequential/
+    hybrid analogue of PhaseHandoffPacket (§B.5). Assembled DETERMINISTICALLY by the Fan-in
+    Coordinator (union → dedup → priority-truncate over completed WCPs) — Fan-in still makes
+    zero model calls (§D.4.1). This is the ONLY mechanism by which one worker's findings reach
+    a later worker; there is no direct channel (§D.9.1)."""
+    task_id: str
+    plan_version: int
+    covers_waves: list[int]                       # waves whose WCPs are summarized here
+    for_wave: int
+    interfaces_changed: list[dict]                # [{symbol_id, before, after, by_subtask}]
+    files_touched: list[str]                      # merged + deduped across covered waves
+    discovered_dependencies: list[str]            # symbol_ids / paths
+    constraints_for_next_waves: list[str]         # short strings; long detail → artifact_refs
+    unresolved_issues: list[str]                  # ClarificationEscalation ids still open
+    artifact_refs: list[str]                      # Blackboard pointers
+    token_budget: int                             # hard cap (§B.5's table, "wave → wave" row)
+    truncated: bool                               # True → items dropped; drop order in §D.10.6
 
 class ImplementationResult(TypedDict):
     """One entry per CodeGen branch outcome. Appended to SDLCState.implementation_results
-    (append_only). Fan-in Coordinator reads entries with status='validated' for merge;
-    'blocked' branches are paired with ClarificationEscalation entries instead."""
+    (append_only). Merge uses merge_eligible (§D.4.1); blocked/failed never merge."""
     subtask_id: str
     worker_id: str
     attempt_number: int
+    plan_version: int                 # which ExecutionPlan generation dispatched this
+    wave_index: int                   # which wave within that plan
     diff_ref: str                     # Blackboard pointer — not inlined
     touches_files: list[str]          # cross-checked against WCP.touches_files at fan-in
     status: Literal["validated", "blocked", "failed"]
-    # validated: passed Validator(implementation) for this attempt — eligible for fan-in merge
-    # blocked:   worker stopped via ClarificationEscalation — fan-in batches, does not merge
-    # failed:    validation exhausted or unrecoverable error on this attempt
+    # validated: passed Validator(implementation) at write time — merge-eligible ONLY if
+    #            (subtask_id, plan_version, attempt_number) ∉ demotion_ignore_keys (§D.4.1 merge_eligible)
+    # blocked:   worker stopped via ClarificationEscalation — never merged
+    # failed:    validation exhausted or unrecoverable error — never merged
+    # Rows are append-only and NEVER rewritten. Demotion does not change this status;
+    # it adds the attempt key to SDLCState.demotion_ignore_keys.
 
 class QAEvidence(TypedDict):
     static_analysis: dict | None
@@ -277,15 +404,21 @@ class HITLRequest(TypedDict):
     timeout_at: datetime
 
 class WorkerCoordinationPacket(TypedDict):
-    """Mandatory, structured self-report every parallel worker (CodeGen sub-agent,
-    and any future Send-dispatched worker) emits on branch exit — success or stop.
-    Produced as part of the SAME model call that produces the worker's primary
-    output wherever possible (structured-output schema, §E.3), not a second LLM
-    round-trip. This is what the Fan-in Coordinator (§D.4) reads to detect
-    assumption drift and cross-worker interface conflicts that raw diffs alone
-    would not surface until much later (Integration Validator, or worse, QA)."""
+    """Mandatory, structured self-report EVERY dispatched worker emits on branch exit —
+    success or stop — in EVERY topology (§D.10). Produced as part of the SAME model call
+    that produces the worker's primary output wherever possible (structured-output schema,
+    §E.3), not a second LLM round-trip.
+
+    Two distinct consumers, which is why this survives the move away from parallel-only:
+      1. Fan-in Coordinator (§D.4.1) — detects cross-worker assumption drift and interface
+         conflicts within a wave. Vacuous when wave width == 1.
+      2. WaveHandoffNote assembly (§D.10.6) — carries wave K's discoveries to wave K+1.
+         This consumer is MORE load-bearing under sequential/hybrid execution, not less:
+         it is the only sanctioned path by which one worker's findings reach another."""
     subtask_id: str
     worker_id: str
+    plan_version: int                             # ExecutionPlan generation that dispatched it
+    wave_index: int                               # wave within that plan
     assumptions: list[str]                       # what the worker believed true
     discovered_dependencies: list[str]            # symbols/files touched beyond its assigned scope
     interface_changes: list[dict]                 # [{symbol, before, after}] — symbol MUST use RI symbol_id format (§G.6.1)
@@ -326,6 +459,9 @@ class ReplanContext(TypedDict):
     task_id: str
     attempt_number: int
     previous_decomposition: TaskDecomposition
+    previous_plan: ExecutionPlan                   # so the Manager sees the schedule it is revising
+    previous_topology_decision: TopologyDecisionRecord
+    completed_wave_indices: list[int]              # already merged — NOT to be re-planned (§D.10.5)
     previous_assumptions: list[str]                # aggregated from prior WCPs
     validator_findings: list[dict]                 # prior FeedbackReport.validator_findings
     wcp_summaries: list[str]
@@ -333,7 +469,28 @@ class ReplanContext(TypedDict):
     prior_manager_decisions: list[str]
     affected_worker_ids: list[str]
     repo_discoveries: list[str]                    # net-new facts surfaced since original decomposition
+    discovered_edges: list[SubtaskDependencyEdge]  # runtime edges that triggered this replan
     unresolved_risks: list[str]
+
+class ContextLedgerEntry(TypedDict):
+    """One durable, structured fact about this task, with provenance. The Context Ledger
+    (§H.5) is the mechanism that makes 'critical information survives compression' a
+    guarantee rather than a hope: ledger entries are DERIVED deterministically from typed
+    state, are small by construction (short statement + pointer), and are NEVER an input to
+    the compression pipeline — they sit in the pinned context tier (§H.6, Tier 0)."""
+    fact_id: str
+    task_id: str
+    kind: Literal["decision", "constraint", "interface", "assumption",
+                  "discovered_fact", "unresolved_issue", "error", "validation_result"]
+    subject: str                                   # symbol_id, file path, module, or subtask_id
+    statement: str                                 # ≤ 200 chars; detail lives behind provenance_refs
+    provenance_refs: list[str]                     # Blackboard pointers / WCP ids / escalation ids
+    phase: str
+    plan_version: int | None
+    wave_index: int | None
+    confidence: float
+    status: Literal["active", "superseded", "resolved"]
+    created_at: datetime
 
 class SDLCState(TypedDict):
     # ── Identity ──────────────────────────────────────────────────────
@@ -347,6 +504,18 @@ class SDLCState(TypedDict):
     implementation_results: Annotated[list[ImplementationResult], append_only]
     qa_evidence: QAEvidence | None
     deployment_record: DeploymentRecord | None
+
+    # ── Execution topology (Development phase only, §D.10) ────────────
+    # `execution_plan` is REPLACE-semantics (single current plan); every superseded plan
+    # is preserved in `topology_decisions`, so replacing it loses no audit history.
+    execution_plan: ExecutionPlan | None
+    plan_version: int                                          # mirrors execution_plan.plan_version
+    current_wave_index: int                                    # -1 before first dispatch
+    topology_decisions: Annotated[list[TopologyDecisionRecord], append_only]
+    wave_handoff_notes: Annotated[list[WaveHandoffNote], append_only]
+    plan_amendment_count: int                                  # bounded by §D.10.5's cap
+    demotion_ignore_keys: list[dict]                           # replace-semantics; [{subtask_id, plan_version, attempt_number}]
+                                                               # Fan-in merge eligibility must skip these keys (§D.4.4)
     
     # ── Communication channels (append-only) ──────────────────────────
     # `messages` is EXCLUSIVELY the human/system conversation transcript (user
@@ -372,6 +541,12 @@ class SDLCState(TypedDict):
     # ── Intent Tracking ───────────────────────────────────────────────
     intent_version: int
     intent_last_updated: datetime | None
+
+    # ── Context management (§H.5) ─────────────────────────────────────
+    # Structured durable facts, never compressed. Small by construction; if this list
+    # grows past its cap, superseded/resolved entries are evicted first (§H.5).
+    context_ledger: Annotated[list[ContextLedgerEntry], append_only]
+    compaction_events: Annotated[list[dict], append_only]      # {trigger, before_tokens, after_tokens, scope}
     
     # ── Cost Tracking ─────────────────────────────────────────────────
     total_input_tokens: int
@@ -450,6 +625,8 @@ confidence_score = (
 | QA             | 0.90  | Block deployment; HITL required                                |
 | Deployment     | 0.95  | Mandatory HITL regardless of risk tier                         |
 
+**Not the same knob as TP-02:** topology width uses a separate safety threshold `confidence_score is None OR < 0.70` (§D.10.3 TP-02 / `tp02_confidence_floor`). Implementation floor **0.75** escalates model tier / Feedback Agent. Do not unify these numbers.
+
 
 
 
@@ -478,9 +655,12 @@ Incoming phase manager reads this packet as primary context. Full upstream detai
 | Requirements → Design                  | 2,000                |
 | Design → Implementation (manager)      | 3,000                |
 | Design → Implementation (per sub-task) | 1,500                |
+| **wave → wave** (`WaveHandoffNote`, §D.10.6) | **2,000**     |
 | Implementation → QA                    | 2,000                |
 | QA → Deployment                        | 1,000                |
 | Any → HITL                             | 3,000                |
+
+The **wave → wave** row is the hard cap for `WaveHandoffNote.token_budget`. It is an *intra-phase* handoff assembled by Fan-in (deterministic), not a phase Manager packet — but it uses the same size-budget discipline as `PhaseHandoffPacket`.
 
 
 
@@ -531,7 +711,7 @@ EvaluationEngine (§L)  ←  TelemetrySink export + SDLCState artifacts + Postgr
 |---|---|---|
 | **Trace** | One `Task` execution (`trace_id` = task-scoped, set at graph invoke) | Reconstruct the whole run. One parent for all child work. |
 | **Span** | Timed unit of work with start/end: PHASE, MANAGER, AGENT, LLM_CALL, TOOL_CALL, VALIDATION, FAN_IN, HITL, SANDBOX | Latency, status, parent/child. Enough to rebuild Decision → Action → Result. |
-| **Event** (span event) | Instant facts that are not themselves timed work: WCP emitted, clarification raised, feedback-loop fired, kill-switch tripped, serialize-and-rerun | Cheap; does not invent fake durations. |
+| **Event** (span event) | Instant facts that are not themselves timed work: WCP emitted, clarification raised, feedback-loop fired, kill-switch tripped, wave_demotion | Cheap; does not invent fake durations. |
 | **Attribute** | IDs, model/provider, tokens, cost, status, retry count, tool name, Blackboard refs | Indexed, queryable, size-bounded. Never dump full diffs or prompts here at MVP. |
 | **Metric** | Counters/histograms: tokens, cost_usd, latency_ms, retries, validation_fail, tool_fail | Aggregates for dashboards (Prometheus from Phase 15). Not a substitute for traces. |
 | **Log** (`structlog`) | Human-readable diagnostics bound to `task_id` + `trace_id` | Debug when a span is not enough. Same correlation IDs. |
@@ -549,11 +729,14 @@ TASK (task_id)
                 ├── TOOL_CALL (tool_name, args_digest, result_status)
                 ├── VALIDATION (validator_id or masc, pass/fail)
                 └── [retry: sibling AGENT span with attempt_number++]
-      └── FAN_IN                          # implementation phase only
+      └── TOPOLOGY_SELECTION             # plan_execution_waves; attributes: topology_class, policy_rules_fired, widths
+      └── WAVE_SCHEDULER                 # one span per wave dispatch; attributes: wave_index, width, plan_version
+           └── AGENT × width             # Send branches
+      └── FAN_IN                          # per wave; events: overlap_detected, wave_demotion, plan_amended, wave_handoff_assembled
       └── HITL                            # interrupt wait; duration = wall clock until resume
 ```
 
-Parallel `Send` branches are sibling AGENT spans under the same MANAGER span. Fan-in is a sibling of those agents, not a child of one worker.
+`Send` branches are sibling AGENT spans under the current WAVE_SCHEDULER (or MANAGER if no scheduler span yet in older traces). Fan-in is a sibling of that wave's agents, not a child of one worker.
 
 ### B.8.3 `TelemetrySink` Protocol (canonical interface)
 
@@ -568,6 +751,7 @@ from typing import Literal
 SpanKind = Literal[
     "task", "phase", "manager", "agent",
     "llm_call", "tool_call", "validation", "fan_in", "hitl", "sandbox",
+    "topology_selection", "wave_scheduler",
 ]
 
 class TelemetrySink(Protocol):
@@ -661,7 +845,7 @@ If the orchestrator is replaced, **only this adapter file changes**. `TelemetryS
 
 `BaseAgent.run()` (Phase 05) records the AGENT span, child LLM spans (via adapter), TOOL_CALL spans per tool, VALIDATION span for MASC.
 
-Fan-in Coordinator (Phase 06) records a FAN_IN span plus events: `overlap_detected`, `semantic_conflict`, `serialize_and_rerun`, `replan_triggered` — attributes are booleans/counts/subtask_ids, not diffs.
+Fan-in Coordinator (Phase 06) records a FAN_IN span plus events: `overlap_detected`, `semantic_conflict`, `wave_demotion`, `plan_amendment`, `replan_triggered` — attributes are booleans/counts/subtask_ids, not diffs.
 
 ### B.8.6 Correlation with existing stores
 
@@ -736,11 +920,18 @@ Orchestrator Graph (per Task)
 ├── Requirements Subgraph
 ├── Design Subgraph
 ├── Implementation Subgraph
-│   ├── Implementation Manager (decompose + pre-dispatch check, §D.4.2)
-│   ├── [Send API → parallel CodeGen instances, isolated worktrees (§D.4.3)]
-│   │     each branch: CodeGen → Validator(implementation) [per-branch, tool-only, §D.4.1]
-│   ├── Fan-in Coordinator (deterministic, §D.4.1)
-│   └── Integration Validator (§E.8 — BaseAgent with tool calls, not a Validator template)
+│   ├── Implementation Manager (ONE structured LLM → TaskDecomposition; then Python selector)
+│   ├── Topology Selector (deterministic, no model call, §D.10.3)
+│   │     → ExecutionPlan (waves) + TopologyDecisionRecord
+│   ├── Wave Scheduler ◀──────────────────────┐  (deterministic loop node, §D.4.0)
+│   │     ├── [Send API → CodeGen × width,    │   isolated worktrees (§D.4.3)]
+│   │     │     each branch: CodeGen → Validator(implementation) [per-branch, tool-only]
+│   │     └── Fan-in Coordinator (deterministic, per wave, §D.4.1)
+│   │              ├── merge → WaveHandoffNote → next wave ──┘
+│   │              ├── conflict → wave demotion (§D.4.4)
+│   │              ├── new dependency → plan amendment (deterministic, §D.10.5)
+│   │              └── broken decomposition → bounded Manager replan (§D.9.6)
+│   └── Integration Validator (§E.8 — runs ONCE after the final wave, on the full merged set)
 ├── QA Subgraph
 │   └── [Send API → parallel QA tool runners]
 ├── Review Subgraph
@@ -807,45 +998,119 @@ Backward edges (explicit, not implicit):
 
 
 
-## D.4 Parallel Execution & Conflict Handling
+## D.4 Wave Execution & Conflict Handling
 
-Fan-out via `Send` API for: independent implementation sub-tasks, parallel QA tool runners, embedding generation.
+Fan-out via `Send` API for: implementation sub-tasks within a wave, parallel QA tool runners, embedding generation.
+
+> **Scope of Revision 3.1:** §D.4 describes the **Development (Implementation) phase's wave executor**. QA's parallel tool runners and embedding fan-out are unchanged — they are genuinely independent tool invocations with no inter-task dependency structure, so a topology decision would have nothing to decide.
 
 ### D.4.0 Canonical Implementation Subgraph Order
 
-Every document describing the implementation phase MUST use this exact sequence:
+Every document describing the implementation phase MUST use this exact sequence. There is **one** executor; parallel, sequential, and hybrid are all expressed as different `ExecutionPlan.waves` shapes (§D.10.1) — not different code paths.
 
 ```
-Implementation Manager
-  → Send fan-out (one branch per sub-task in each parallel group)
-       Per branch (isolated worktree, §D.4.3):
-         1. CodeGen Sub-agent → diff + WorkerCoordinationPacket (Blackboard refs)
-         2. Validator(implementation) [static-analysis, tool-only, independent of CodeGen]
-              ├─ pass → append ImplementationResult(status="validated") — branch eligible for fan-in
-              └─ fail → FL-04 → FeedbackReport → retry CodeGen (same subtask_id, attempt_number++)
-                        └─ 3× fail on same module → Feedback Agent → HITL if still failing
-  → Fan-in Coordinator (§D.4.1) — all branches in the parallel group complete or blocked
-  → Integration Validator (merged diff set)
-       └─ fail → FL-05 → Implementation Manager (re-assign, max 2×)
+Implementation Manager (LLM)
+  → TaskDecomposition (WHAT: sub-tasks, scopes, declared dependencies)
+
+Topology Selector (deterministic, zero LLM calls, §D.10.3)
+  → SubtaskDependencyGraph (RI-verified typed edges)
+  → ExecutionPlan (WHEN: ordered waves) + TopologyDecisionRecord (WHY)
+
+Wave Scheduler (deterministic loop node) — for wave_index = 0 … N-1:
+  │
+  ├─ Send fan-out: one branch per subtask_id in waves[wave_index]
+  │     (dispatched ≤ dispatch_concurrency at a time; width==1 ⇒ an ordinary
+  │      single-branch dispatch, NOT a special "sequential mode")
+  │
+  │   Per branch (isolated worktree, §D.4.3):
+  │     1. CodeGen Sub-agent → diff + WorkerCoordinationPacket (Blackboard refs)
+  │        (context = sub-task spec + WaveHandoffNote for this wave, §D.10.6)
+  │     2. Validator(implementation) [static-analysis, tool-only, independent of CodeGen]
+  │          ├─ pass → append ImplementationResult(status="validated")
+  │          └─ fail → FL-04 → FeedbackReport → retry CodeGen (same subtask_id, attempt_number++)
+  │                    └─ 3× fail on same module → Feedback Agent → HITL if still failing
+  │
+  ├─ Fan-in Coordinator (§D.4.1) — runs at the end of EVERY wave, in every topology
+  │     ├─ merge merge_eligible branches into the integration worktree
+  │     ├─ assemble WaveHandoffNote for the next wave (§D.10.6)
+  │     ├─ conflict → wave demotion SM (§D.4.4)
+  │     ├─ new blocking edge affecting only undispatched waves → plan amendment (§D.10.5)
+  │     └─ needs_manager_attention / open escalation → bounded Manager replan (§D.9.6)
+  │
+  └─ more waves remain? ──yes──▶ loop to next wave
+                          └no──▶ exit loop
+
+Integration Validator (ONCE, after the final wave, on the full merged diff set)
+  └─ fail → FL-05 → Implementation Manager (re-assign, max 2×)
 ```
 
-**Key invariant:** `Validator(implementation)` runs **per branch, before Fan-in** — never on the merged result. Only branches with `ImplementationResult.status="validated"` enter merge eligibility. `FL-04` targets the originating CodeGen sub-agent because validation is per-diff, not post-merge.
+**Key invariants:**
+
+1. `Validator(implementation)` runs **per branch, before Fan-in** — never on the merged result. Merge uses `merge_eligible` (§D.4.1). `FL-04` targets the originating CodeGen sub-agent because validation is per-diff, not post-merge.
+2. **Fan-in runs per wave; Integration Validator runs once per implementation attempt.** Fan-in is deterministic and near-free, so running it after every wave costs almost nothing and is what makes cross-wave conflict detection possible. Integration Validator is a High-capability agent with sandboxed test execution — running it per wave would multiply the phase's cost by the wave count for no correctness gain.
+3. **A width-1 wave is not a special case.** Fan-in still runs. Its intra-wave comparisons (decisions 2, 3, 5) are trivially empty, but its cross-wave check, its merge authority, and its handoff-note assembly all still apply. Preserving one code path across all topologies is the entire point of §D.10.1.
+
+**Responsibility ownership (no duplicates):**
+
+| Responsibility | Owner | Must not |
+|---|---|---|
+| WHAT (subtasks, scopes, declared deps) | Implementation Manager (LLM) | Topology, waves, width, Send |
+| DAG correctness (blocking edges) | SDG / RI in Topology Selector | Delete blocking edges for throughput |
+| Conservatism (max_wave_width) | TP-01…TP-08 YAML + profile/ctx bounds | Invent edges or subtasks |
+| WHEN / how much (waves, dispatch) | `plan_execution_waves` + Wave Scheduler | LLM |
+| Mechanical `Send` | **Wave Scheduler only** | Manager, Fan-in, workers |
+| Independent execution | CodeGen workers | Sibling comms, merge |
+| Wave boundary / merge / demote / amend / handoff | Fan-in (deterministic) | LLM, unmerge completed waves |
+| Per-branch static check | Validator(implementation) | Judge merged contracts |
+| Merged-contract judgment | Integration Validator (once) | Run per wave |
+| Historical attempts | append-only results/WCP + `demotion_ignore_keys` | Rewrite rows |
+
+### D.4.0.1 Representing the wave loop in LangGraph
+
+The wave loop is a **scheduler node that re-enters itself**, not a set of statically declared per-wave nodes. LangGraph graphs are compiled ahead of time; the number of waves is known only at runtime.
+
+| Concern | Mechanism |
+|---|---|
+| Dynamic fan-out of unknown width | `Send(codegen_branch, subtask_payload)` returned from the scheduler's conditional edge — one `Send` per subtask in the current wave |
+| Advancing to the next wave | Fan-in returns `Command(goto="wave_scheduler")` after incrementing `current_wave_index` |
+| Termination | Scheduler routes to `integration_validator` when `current_wave_index >= len(execution_plan.waves)` |
+| Parallel-safe state merge | All per-branch writes land in `append_only` channels (`implementation_results`, `worker_coordination_packets`, `clarification_escalations`). No branch writes a replace-semantics field — this is what prevents concurrent-update errors at superstep boundaries |
+| Loop bounding | `recursion_limit` must be set to at least `waves × (retries+1) × 3`; independently, `plan_amendment_count` and the replan cap bound the number of loop re-entries (§D.10.5). Exceeding either is a Fail-Closed escalation, never a silent stop |
+| Checkpoint size | `ExecutionPlan` is replace-semantics and small (ids + edges, no payloads). Diffs and logs remain Blackboard pointers (§D.9.4) |
+| Wave-close compaction | `compact_at_wave_close` is invoked from Fan-in after handoff. **Phase 06: no-op stub.** Phase 12 implements T2/T3. Topology must not depend on compaction succeeding. |
+
+**Why a scheduler loop rather than compiling one node per wave:** the wave count depends on a dependency graph that is only known after the Manager decomposes, and it changes at runtime under amendment (§D.10.5). A statically compiled per-wave topology would have to be recompiled mid-task, which discards the checkpointer's graph identity and makes resume-after-crash unreliable. One self-re-entering node is stable across recompiles, checkpoints cleanly, and is the idiom LangGraph's `Send` + `Command(goto=...)` pair is designed for.
 
 ### D.4.1 Fan-in Coordinator (deterministic, not an agent)
 
-Every fan-out (`Send`) is closed by a **Fan-in Coordinator** graph node. This is explicitly **not an LLM call, not an agent, and not a reasoning component** — it is a deterministic function over branch outputs and their `WorkerCoordinationPacket`s (§D.9.2). Its job is to decide, by rule, what happens next; it never generates or resolves code itself.
+Every wave's fan-out (`Send`) is closed by a **Fan-in Coordinator** graph node. This is explicitly **not an LLM call, not an agent, and not a reasoning component** — it is a deterministic function over branch outputs and their `WorkerCoordinationPacket`s (§D.9.2). Its job is to decide, by rule, what happens next; it never generates or resolves code itself.
 
-**Input scope:** Fan-in runs only after every branch in the parallel group has either (a) produced an `ImplementationResult` with `status="validated"`, or (b) stopped with `status="blocked"` and a `ClarificationEscalation`. Branches mid-FL-04 retry do not trigger fan-in — LangGraph keeps the branch open until validation passes or exhausts.
+**Input scope:** Fan-in runs only after every branch **in the current wave** is **terminal**: `ImplementationResult.status` ∈ {`validated`, `blocked`, `failed`}. Branches mid-FL-04 retry do not trigger fan-in — LangGraph keeps the branch open until validation passes or exhausts.
+
+**Single merge-eligibility predicate (`merge_eligible`, source of truth):**
+
+```
+merge_eligible(r: ImplementationResult) iff
+    r.status == "validated"
+    AND (r.subtask_id, r.plan_version, r.attempt_number) not in demotion_ignore_keys
+```
+
+ImplementationResult rows are never rewritten. Demotion only adds keys to `demotion_ignore_keys`.
 
 **Decisions the Fan-in Coordinator performs, in order:**
 
-1. **WCP selection** — for each `subtask_id`, consider only the `WorkerCoordinationPacket` with the highest `attempt_number` (superseded WCPs from prior attempts are ignored, not deleted).
-2. **Overlap detection** — computes the file set touched by each validated branch (`WorkerCoordinationPacket.touches_files`, cross-checked against `ImplementationResult.touches_files` and the actual diff from Blackboard) and flags any pairwise overlap.
-3. **Semantic conflict detection (WCP-based, deterministic)** — independent of file overlap, applies the rules in §D.4.1.1.
-4. **Merge eligibility** — validated branches with no file overlap and no flagged semantic conflict are merged into the integration worktree (§D.4.3).
-5. **Serialization** — overlapping branches (by file or by flagged semantic conflict) are discarded and re-dispatched *sequentially* per §D.4.4 — never silently auto-merged.
-6. **Replanning trigger** — if any `WorkerCoordinationPacket.needs_manager_attention` is set, or a `ClarificationEscalation` was raised (§D.9.3) by any branch, the Coordinator batches these and routes to the Implementation Manager for a bounded replan (§D.9.6) *before* proceeding to Integration Validator — capped at one replan per parallel group per attempt.
-7. **Integration Validator triggering** — once merge/serialization/replan resolve cleanly, dispatch to `Integration Validator`.
+1. **WCP / result selection** — for each `subtask_id` in this wave, take the packet/result with the highest `(plan_version, attempt_number)` that is `merge_eligible`. Blocked/failed terminals are visible for replan (decision 8) but never merged.
+2. **Intra-wave overlap detection** — file sets touched by each merge-candidate branch in this wave (`WorkerCoordinationPacket.touches_files`, cross-checked against `ImplementationResult.touches_files` and the Blackboard diff). Flags pairwise overlap. *No-op when wave width is 1.*
+3. **Intra-wave semantic conflict detection (WCP-based, deterministic)** — §D.4.1.1. *No-op when wave width is 1.*
+4. **Cross-wave compatibility check** — for each merge-candidate in this wave, compare its `touches_files` and consumed symbols against **prior** `WaveHandoffNote` history (waves `0..current-1` already merged). Detects: editing a file an earlier wave already changed in a conflicting way; assuming a signature that an earlier wave changed incompatibly. Runs at every wave width, including 1. Uses §D.4.1.1 rules with the accumulated handoff note substituted for sibling WCPs. If the conflict is against **already-merged** work that cannot be demoted, escalate to Manager replan (§D.4.4.4) — do not unmerge.
+5. **Merge eligibility** — remaining `merge_eligible` candidates with no flagged overlap/conflict are merged into the integration worktree (§D.4.3).
+6. **Wave demotion** — if conflict set `C` has size ≥ 2 among this wave's candidates, run §D.4.4 state machine (supersede all of `C`, amend active plan, redispatch). Never silently auto-merge.
+7. **Plan amendment (pure)** — any `discovered` dependency in this wave's WCPs that constrains only **not-yet-dispatched** subtasks (and did not already enter demotion) is added to the SDG; remaining waves re-levelized. Bounded by `plan_amendment_count` (§D.10.5).
+8. **Replanning trigger** — `needs_manager_attention`, open `ClarificationEscalation`s, demotion abort (cycle), or cross-wave-vs-merged escalation → at most one Manager replan per wave per attempt (§D.9.6).
+9. **`WaveHandoffNote` assembly** — union/dedup/priority-truncate over **merge-eligible** WCPs only (§D.10.6). Zero model calls.
+10. **Advance or exit** — if unexecuted waves remain in the **active** plan, increment `current_wave_index` and `Command(goto="wave_scheduler")`. Else → Integration Validator.
+
+**Topology-independence of this node is a deliberate design property.** Under a single wide wave (parallel) decisions 2/3 do the work; under N width-1 waves (sequential) decisions 4/9 do the work; under a hybrid DAG all of them do. There is no branch in this node on `topology_class` — it reads `ExecutionPlan.waves` and behaves accordingly.
 
 #### D.4.1.1 WCP Semantic-Conflict Matching Rules (v1, deterministic, no LLM)
 
@@ -856,7 +1121,7 @@ For each unordered pair of branches `(A, B)` where both have `status="validated"
 3. **Substring fallback (assumptions only):** if step 2 finds no match, conflict if any normalized `A.interface_changes[].symbol` appears as a substring in any normalized `B.assumptions` string (or vice versa). Do **not** apply substring matching to `discovered_dependencies` — exact symbol_id match only for that field.
 4. **RI caller cross-check:** for each `interface_changes[].symbol` in branch A, call `get_callers(symbol, depth=1)`. Conflict if any caller's `symbol_id` appears in branch B's `assumptions` or `discovered_dependencies` (normalized exact match).
 5. **Parse failure → Fail-Closed:** if any WCP field required for steps 1–4 is missing or fails schema validation, set `needs_manager_attention=true` on that WCP and route to Manager replan (step 6 above) — never silently treat as non-conflicting.
-6. **RI unavailable during cross-check:** if step 4's RI call fails or times out, treat as conflict (Fail-Closed) and flag for serialize-and-rerun or Manager replan — never assume no conflict.
+6. **RI unavailable during cross-check:** if step 4's RI call fails or times out, treat as conflict (Fail-Closed) and enter **wave demotion** if `|C|≥2`, else Manager replan — never assume no conflict.
 
 Overlapping/conflicting branches are **never** silently merged — this correctness-over-throughput stance is unchanged from earlier revisions of this document, now made precise by having the Coordinator's exact decision list written down instead of left to "the fan-in node checks for overlaps."
 
@@ -868,19 +1133,20 @@ Overlapping/conflicting branches are **never** silently merged — this correctn
 
 At high task volume, concurrent graphs hit shared Repository Intelligence stores. Mitigation: read/write separation (incremental-indexing writes → primary; agent-execution reads → replicas).
 
-### D.4.2 Pre-dispatch Overlap Check (deterministic, Manager-owned)
+### D.4.2 Pre-dispatch Overlap Check → superseded by Topology Selection
 
-Before the Implementation Manager calls `Send()` for any parallel group, it **may** run one lightweight, deterministic validation — no LLM call, no prediction, no new agent. This is an optimization only; the Fan-in Coordinator (§D.4.1) remains the **final authority** for overlap and conflict detection after workers complete.
+> **Changed in Revision 3.1.** V3.0's "pre-dispatch overlap check" was an *optional* deterministic scan the Manager ran immediately before `Send()`. It has been **promoted into a mandatory, first-class component**: the Topology Selector (§D.10.3), which performs the same file/symbol/dependency comparison and then goes further — it builds a typed dependency graph and derives the entire wave schedule from it. The old check is not deleted; it is subsumed. Do not implement both.
 
-The Manager compares, using Repository Intelligence and the proposed `TaskDecomposition`:
+What the Topology Selector does with the inputs V3.0 listed:
 
-- `ownership_map` — which sub-task claims which module/file scope
-- planned file sets per sub-task (from decomposition + RI file index lookups)
-- dependency graph consistency (`get_dependencies` / `get_dependents`)
+| V3.0 pre-dispatch input | V3.1 use |
+|---|---|
+| `ownership_map` — which sub-task claims which scope | Source of `file_overlap` / `symbol_overlap` edges (§D.10.2) |
+| Planned file sets per sub-task (decomposition + RI file index) | Same; plus `shared_resource` edge derivation from the L4 architecture summary |
+| Dependency graph consistency (`get_dependencies`/`get_dependents`) | Source of `produces_interface` edges, and verification of the Manager's `declared` edges |
+| "Merge overlapping sub-tasks or move one to a later group" | Now a rule with a defined precedence: overlap on the *same file with no ordering that resolves it* → merge sub-tasks; overlap that a strict ordering resolves → separate waves (§D.10.3 step 3) |
 
-If obvious file-level overlap is detected among sub-tasks scheduled to run in the **same parallel group**, the Manager adjusts decomposition **before dispatch** — typically by merging overlapping sub-tasks or moving one to a later sequential group. If no overlap is found, dispatch proceeds unchanged.
-
-This check never replaces Fan-in validation. Workers may still touch files outside their assigned scope during execution; Fan-in + WCP semantic-conflict detection catches that. The pre-dispatch check only reduces avoidable fan-out/re-run cycles when overlap is already visible in the plan.
+**Unchanged:** this remains an optimization in the safety sense — the Fan-in Coordinator (§D.4.1) is still the **final authority**. Workers may touch files outside their assigned scope during execution, and only Fan-in sees what actually happened. Pre-dispatch analysis reduces avoidable re-run cycles; it never licenses skipping a Fan-in check.
 
 ### D.4.3 Git Isolation Contract
 
@@ -888,27 +1154,134 @@ Minimal, binding rules for parallel CodeGen and Fan-in merge. No new agents — 
 
 | Concept | Convention |
 |---|---|
-| **Base commit** | `task_base_sha` — repo HEAD at Implementation Manager dispatch time; immutable for the task attempt |
-| **Per-branch worktree** | `{repo_root}/.sdlc/worktrees/{task_id}/{subtask_id}/` on branch `sdlc/{task_id}/{subtask_id}` |
+| **Base commit** | `task_base_sha` — repo HEAD at Implementation Manager dispatch time; immutable for the task attempt. **Wave 0 branches only.** |
+| **Base commit, waves ≥ 1** | **Integration HEAD** as of the previous wave's Fan-in merge. This is what makes sequential and hybrid execution meaningful at the git level: a later wave's worker sees earlier waves' applied changes in its working tree, not just in its handoff note. A wave-0 branch and a wave-3 branch therefore have different bases *by design* |
+| **Wave base (demotion)** | When a subtask is redispatched after demotion, its worktree is created from **integration HEAD at redispatch time** (after any non-conflicting siblings from the failed wave have merged, and after any ordered predecessors in the demotion serial chain have merged). Never reuse a discarded conflict worktree in place. |
+| **Per-branch worktree** | `{repo_root}/.sdlc/worktrees/{task_id}/{subtask_id}/` on branch `sdlc/{task_id}/{subtask_id}` (one per `(task_id, subtask_id)` at a time — a demoted sub-task's worktree is destroyed and recreated from the new base) |
 | **Integration worktree** | `{repo_root}/.sdlc/worktrees/{task_id}/integration/` on branch `sdlc/{task_id}/integration` |
 | **Branch naming** | `sdlc/{task_id}/{subtask_id}` for workers; `sdlc/{task_id}/integration` for merged result |
 | **Allowed writers** | CodeGen sub-agent → its own per-branch worktree only. Fan-in Coordinator → integration worktree only. No other component writes git state during implementation. |
-| **Merge authority** | Only Fan-in Coordinator applies validated branch diffs into the integration worktree. Workers never merge into integration or sibling worktrees. |
-| **Serialize-and-rerun replay** | On serialization (§D.4.4): discard affected branch worktrees, recreate from `task_base_sha`, re-dispatch sequentially — second branch's worktree is created **after** first branch's diff is applied to integration, then branched from integration HEAD so it sees the first branch's applied change. |
+| **Merge authority** | Only Fan-in Coordinator applies `merge_eligible` branch diffs into the integration worktree. Workers never merge. |
 | **Cleanup** | Remove all `{task_id}` worktrees/branches on: successful Implementation phase exit, task cancellation (§D.9.9), or task completion. Partial cleanup on fan-in merge success is allowed but full task cleanup is mandatory at phase exit. |
 
 **Blackboard pointer format (all services):** `{task_id}/{kind}/{uuid}` — e.g. `abc123/diff/7f3a…`. Returned by `BlackboardService.store()`; accepted by `retrieve()` and `exists()`.
 
-### D.4.4 Serialize-and-Rerun LangGraph Flow
+### D.4.4 Wave Demotion — Formal State Machine
 
-When Fan-in decision 5 (serialization) fires:
+**Wave demotion** is the deterministic recovery path when Fan-in decision 6 fires (intra-wave file overlap, intra-wave semantic conflict, or cross-wave incompatibility involving branches that just finished). It replaces V3.0's ad-hoc "serialize-and-rerun" node.
 
-1. Fan-in Coordinator marks the conflicting `ImplementationResult` entries as superseded (new attempt will produce fresh entries).
-2. Returns `Command(goto="codegen_sequential_redispatch")` — **not** a new `Send` fan-out. The conflicting sub-tasks run as ordinary sequential graph nodes (group size = 1), in dependency order determined by the Manager.
-3. Each redispatched sub-task increments `attempt_number`; idempotency checks (§D.9.8) key on `(task_id, subtask_id, attempt_number)`.
-4. Each redispatched branch repeats the full per-branch path: CodeGen → Validator(implementation) → append new `ImplementationResult`.
-5. After all serialized branches complete validation, Fan-in Coordinator **re-runs** decisions 1–7 on the new result set — it does not proceed to Integration Validator until the serialized group is conflict-free or escalates via replan/HITL.
-6. Manager interaction: if serialization alone cannot resolve (e.g. circular semantic dependency), Fan-in triggers the bounded Manager replan (§D.9.6) with assembled `ReplanContext` before a third fan-out attempt.
+#### D.4.4.0 Active plan vs historical record (mandatory distinction)
+
+| Concept | Storage | Mutable after demotion? |
+|---|---|---|
+| **Active `ExecutionPlan`** | `SDLCState.execution_plan` (replace-semantics) | **Yes** — remaining schedule is rewritten (`plan_version++`, `created_from="amendment"`) |
+| **Historical topology decisions** | `SDLCState.topology_decisions` (`append_only`) | **No** — prior `TopologyDecisionRecord` rows remain |
+| **Historical attempts** | `implementation_results`, `worker_coordination_packets` (`append_only`) | **No** — old rows stay; conflicting ones are marked non-mergeable |
+| **Telemetry** | `TelemetrySink` events (`wave_demotion`, …) | Append-only audit |
+
+**Forbidden representation:** leaving the live plan as `Wave0=[A,B]` plus an extra `Wave1=[B]` while A's conflicting result remains mergeable. That mixes history with the active schedule and allows accidental double-merge.
+
+**Correct mental model:** Wave0 *attempted* `[A,B]` (recorded in telemetry + superseded/ignored results). The *active* plan after demotion places A and B in **later distinct waves** (usually width 1). Neither old result may merge.
+
+#### D.4.4.1 Trigger
+
+Fan-in selected validated results for the current wave and computed a **conflict set** `C` with `|C| ≥ 2`.
+
+#### D.4.4.2 State machine (deterministic, zero LLM)
+
+```
+DEMOTION_BEGIN(conflict_set C, current_wave_index W, plan P @ plan_version=v)
+
+S1. FREEZE_MERGE
+    No member of C is merge-eligible.
+    Non-members S = (validated in wave W) \ C remain eligible and are merged
+    under decision 5 before S2 (siblings must not be stranded).
+
+S2. SUPERSEDE
+    For each subtask_id in C:
+      - add (subtask_id, plan_version, attempt_number) to
+        SDLCState.demotion_ignore_keys (replace-semantics set).
+        Do NOT rewrite ImplementationResult.status (append-only).
+      - destroy worktrees for those subtask_ids (§D.4.3).
+    Historical WCPs/results remain; merge_eligible and WaveHandoffNote ignore them.
+
+S3. ORIENT
+    Build total order O = [T0, T1, … Tk] over C:
+      a. If evidence implies direction (e.g. produces_interface Ti→Tj), add that
+         blocking discovered edge.
+      b. For every still-undirected conflicting pair, orient lexicographically:
+         smaller subtask_id → larger subtask_id (smaller runs first).
+      c. Topological sort → O.
+      d. If a cycle remains → abort demotion; Fan-in decision 8 (Manager replan)
+         with ReplanContext.discovered_edges. HITL if replan also cycles (§D.10.9).
+
+S4. AMEND_ACTIVE_PLAN  (demotion ⊆ plan amendment, §D.10.5)
+    - Add all blocking discovered edges from S3 to the SDG.
+    - Waves 0..W-1 already fully merged are IMMUTABLE (completed_wave_indices).
+    - Remove all members of C from any not-yet-completed active wave entry.
+    - Let R = (undispatched subtask_ids ∪ C).
+    - Re-run levelize + width-cap (§D.10.3 Steps 4–5) on R only.
+      Amendments must not widen max_wave_width; new edges may only deepen/narrow.
+    - plan_version = v+1; created_from = "amendment"; superseded_plan_version = v.
+    - Append TopologyDecisionRecord; increment plan_amendment_count.
+    - If plan_amendment_count > max_plan_amendments (default 3) → Manager replan.
+
+S5. RECORD_HISTORY
+    Emit TelemetrySink event "wave_demotion":
+      {wave_index: W, conflict_set: C, order: O, old_plan_version: v,
+       new_plan_version: v+1, edges_added: [...]}
+    Do not keep the conflicting parallel set as an executable active wave.
+
+S6. REDISPATCH
+    Command(goto="wave_scheduler") at the first not-yet-executed wave of the
+    amended active plan.
+    For each redispatched subtask:
+      attempt_number += 1
+      idempotency key = (task_id, subtask_id, plan_version, attempt_number)
+      worktree base = integration HEAD at dispatch time
+        (T0 after sibling merges; T1 after T0 merges; …)
+
+S7. CONTINUE
+    Fan-in re-runs decisions 1–10 after every subsequent wave.
+    Integration Validator runs only after the final active wave completes
+    conflict-free (or escalates).
+```
+
+#### D.4.4.3 Contract answers
+
+| Question | Contract |
+|---|---|
+| Winner keeps its diff? | **No.** All of `C` are made non-`merge_eligible` via `demotion_ignore_keys`. “Earlier in `O`” ≠ keep diff. |
+| Order? | Directed evidence if present; else lex `subtask_id`; topo-sort (S3). |
+| Both discarded and rerun? | **Yes.** |
+| Base for T0 / T1..Tk? | Integration HEAD at each dispatch; after predecessor merges for later Ti. |
+| Old WCP / ImplementationResult? | History retained; not merge-eligible; handoff ignores superseded attempts. |
+| `plan_version` / `attempt_number`? | `plan_version++` once per demotion amendment; `attempt_number++` per redispatched subtask. |
+| Active `ExecutionPlan.waves`? | **Rewritten** for remaining work. |
+| Completed waves immutable? | **Yes.** |
+| Demotion ⊆ amendment? | **Yes.** |
+| Termination? | Adds ≥1 blocking edge; ≤ n² edges; amendment cap → replan. |
+| A↔B cycle? | S3.d → Manager replan (not demotion). |
+| 3+ workers? | Same machine on full set `C` → total order → serial blocking chain. |
+
+#### D.4.4.4 Cross-wave conflict against already-merged work
+
+If decision 4 fails against an **already merged** earlier wave, demotion cannot unmerge that wave (§D.6). Fan-in triggers **Manager replan** (decision 8) / HITL — not S1–S7.
+
+#### D.4.4.5 Example
+
+```
+Before: active Wave0 = [A, B]   # believed independent
+Both validate → Fan-in file_overlap(A,B); assume "A" < "B"
+
+History: wave_demotion {conflict_set:[A,B], order:[A,B], v→v+1}; attempts superseded
+Active plan (v+1): Wave0'=[A], Wave1'=[B] with discovered blocking edge A→B
+Git: A from integration HEAD; after A merges, B from new HEAD
+```
+
+**Not** active plan `Wave0=[A,B]; Wave1=[B]`.
+
+---
 
 ## D.5 Retry & Failure Routing
 
@@ -1014,21 +1387,25 @@ A worker that needs something from another worker's output waits for fan-in and 
 
 ### D.9.2 Worker Coordination Packet (WCP)
 
-Every parallel worker (currently: CodeGen sub-agents, §E.8; any future `Send`-dispatched worker inherits this contract) emits a `WorkerCoordinationPacket` (schema in §B.2) on branch exit, whether it completed or stopped itself via `ClarificationEscalation`.
+Every dispatched worker (CodeGen sub-agents, §E.8; any future `Send`-dispatched worker) emits a `WorkerCoordinationPacket` (schema §B.2) on branch exit — success or stop — in **every** topology.
+
+WCP is **not** “parallel-only glue.” It has two jobs:
+
+1. **Intra-wave evidence** for Fan-in conflict detection (vacuous when width=1).
+2. **Raw material** for `WaveHandoffNote` projection to later waves (load-bearing under sequential/hybrid).
 
 | Property | Value |
 |---|---|
-| **Producer** | The worker itself, as part of its normal completion output |
-| **Consumer** | Fan-in Coordinator (§D.4.1); Implementation Manager on replan (via `ReplanContext`) |
-| **Lifecycle** | One WCP per worker per dispatch; appended to `SDLCState.worker_coordination_packets` (`append_only`); superseded (not deleted) on redispatch — Fan-in considers only the highest `attempt_number` WCP per `subtask_id` (§D.4.1 step 1) |
-| **Storage** | Small structured fields inline in `SDLCState`; `artifact_refs` field points to the Blackboard for the actual diff/logs |
-| **Validation** | Schema-validated the same way any agent output is (MASC Check 1, §E.6) — a malformed WCP is treated as `needs_manager_attention=true` (Fail-Closed), never silently dropped |
-| **Token cost** | Designed to be produced as structured-output fields of the *same* model call that produces the worker's diff — not a second LLM round-trip. A worker only needs a second call if its first output's WCP fields are incomplete, which MASC's schema check catches |
-| **Relationship to Fan-in** | Primary input to Coordinator decisions 1–2–5 (§D.4.1) |
-| **Relationship to Validators** | Independent of `Validator`(implementation) and Integration Validator — a WCP reports the worker's own beliefs; it is not itself a validation result |
-| **Relationship to Replanning** | Aggregated into `ReplanContext.wcp_summaries` (§B.2) so a Manager replanning after a flagged WCP sees exactly what was discovered, not a re-summary |
+| **Producer** | The worker, as structured fields of the same model call that produces the diff when possible |
+| **Consumers** | Fan-in (§D.4.1); WaveHandoffNote assembly (§D.10.6); Manager replan via `ReplanContext` |
+| **Lifecycle** | One WCP per dispatch attempt; append-only; non-mergeable attempts excluded via `demotion_ignore_keys` + `merge_eligible` |
+| **Storage** | Small fields inline; diffs/logs via `artifact_refs` → Blackboard |
+| **Must include** | `plan_version`, `wave_index` (attribution + idempotency) |
+| **Must NOT become** | A free-form chat log, a full diff dump, or a worker↔worker inbox |
 
-**Minimum-information principle:** the WCP schema (§B.2) intentionally excludes free-text "notes" or "reasoning" fields beyond `risks`/`assumptions` as short strings — anything longer belongs on the Blackboard via `artifact_refs`, keeping the packet itself cheap to read at fan-in.
+**Projection into `WaveHandoffNote` (copied):** interface_changes → interfaces_changed; touches_files; discovered_dependencies; short risks → constraints; open escalation ids; Blackboard refs for truncated items.
+
+**Not copied into next-worker context:** raw diffs, tool traces, full assumption essays, sibling WCPs wholesale, mid-flight state. Next workers get the capped note + progressive RI tools + Context Ledger (T1). This is what keeps 100k+ file repos tractable.
 
 ### D.9.3 Clarification Escalation Protocol
 
@@ -1047,7 +1424,7 @@ Worker emits ClarificationEscalation (§B.2), sets WorkerCoordinationPacket.bloc
 stops its own branch (does not guess; Fail-Closed) — sibling branches are unaffected and continue
         │
         ▼
-Fan-in Coordinator batches all escalations from the parallel group (D.4.1 decision 5)
+Fan-in Coordinator batches all escalations from the wave (D.4.1 decision 8)
         │
         ▼
 Implementation Manager reasons over the batch using ArchitectureDoc + RI + ReplanContext
@@ -1062,7 +1439,7 @@ with revised instructions         → resume → redispatch
 **Rules:**
 
 - **Repository Intelligence first, always** — `ClarificationEscalation.ri_consulted` must be `true` except for pure scope-ambiguity cases where no repo query could possibly answer the question.
-- **Batched, not streamed** — the Manager resolves a whole parallel group's escalations in at most one reasoning pass per batch, not one call per escalation.
+- **Batched, not streamed** — the Manager resolves a whole wave's escalations in at most one reasoning pass per batch, not one call per escalation.
 - **A worker never resumes itself** — resolution always comes from the Manager (redispatch) or HITL→Manager; there is no worker↔worker "here's the answer" path.
 - **HITL is the exception, not the default path** — reached only when the Manager cannot resolve the escalation from documents it already has authority over (`ArchitectureDoc`, `RequirementsSpec`, RI). Escalations about "which helper function already exists" are RI questions, not HITL questions.
 - **Interaction with Feedback Loops:** an unresolved `ClarificationEscalation` is not itself a `FeedbackReport` — it precedes completion, a `FeedbackReport` follows a completed-but-rejected output (§D.8's table). If redispatch after clarification still fails validation, the *normal* `FL-04`/Feedback Agent path applies from there.
@@ -1093,20 +1470,31 @@ A content-addressed or task-scoped Postgres JSONB/table-backed implementation is
 | `retrieve()` fails / ref missing | Treat as missing artifact → same escalation path; Manager/Fan-in may retry retrieve once, then escalate |
 | `exists()` returns false for required ref | Fail-Closed — do not substitute empty content |
 
-## D.9.5 Manager Authority (Who May Spawn, Reassign, Replan)
+## D.9.5 Coordination Authority vs Mechanical Dispatch (`Send`)
 
-Explicit, project-wide, not per-phase:
+Explicit, project-wide. **Two different privileges must not be conflated:**
 
-| May do | Manager | Worker |
+| Privilege | Who | What it means |
 |---|---|---|
-| Decompose work into sub-tasks | ✅ | ❌ |
-| Dispatch (`Send`) workers | ✅ | ❌ |
-| Redistribute/reassign work between workers | ✅ | ❌ |
-| Trigger a replan | ✅ | ❌ |
-| Spawn additional workers (recursively) | ❌ (not needed — see §D.9.7) | ❌ |
-| Coordinate directly with another worker | ❌ (Managers coordinate via state/redispatch, not "chat") | ❌ |
+| **Coordination authority** | Phase Manager only (Implementation Manager here) | Decompose work, replan, reassign scope, resolve escalations, authorize that an `ExecutionPlan` may run |
+| **Mechanical dispatch** | **Wave Scheduler node only** | Return LangGraph `Send(codegen_branch, …)` for subtasks in the *current active wave* |
+| **Neither** | Workers / CodeGen | Never `Send`, never replan, never reassign |
 
-Only a Manager (Implementation Manager for the implementation phase; the analogous phase Manager elsewhere) holds `Send` authority. A worker that discovers it needs help does not delegate or reassign anything — it raises a `ClarificationEscalation` and stops; only the Manager redispatches. This keeps `max_parallel_impl_agents` (§F.2) and cost budgets meaningful — an uncontrolled worker-spawns-worker path would make both unenforceable.
+| May do | Manager | Wave Scheduler | Worker |
+|---|---|---|---|
+| Decompose / replan / reassign | ✅ | ❌ | ❌ |
+| Produce / amend `ExecutionPlan` via Topology Selector call sites | ✅ (initial + replan); Fan-in may call amendment path | ❌ (consumes plan only) | ❌ |
+| Return `Send` for CodeGen | ❌ | ✅ | ❌ |
+| Emit WCP / ClarificationEscalation | ❌ | ❌ | ✅ |
+
+**Why Wave Scheduler issues `Send` (not the Manager node):** LangGraph fan-out must happen from the node whose conditional edge returns `Send` objects at the wave boundary. The Manager is an LLM node that should not also be the fan-out edge. The Scheduler is a **deterministic orchestration node** in the Implementation subgraph — it is not a Worker and not an LLM. This preserves `max_parallelism` enforcement: only the Scheduler can open branches, and only for ids present in `execution_plan.waves[current_wave_index]`.
+
+**Mechanically enforceable checks (acceptance tests):**
+1. Grep/graph audit: no CodeGen node returns `Send`.
+2. Wave Scheduler refuses to dispatch ids not in the active wave.
+3. Workers have no graph edge that can invoke `Send`.
+
+A worker that needs help raises `ClarificationEscalation` and stops; only the Manager redispatches via a new plan consumed by the Scheduler.
 
 ### D.9.6 Conditional Coordination (No Always-On Meetings)
 
@@ -1115,10 +1503,10 @@ Coordination beyond the default isolated-worker → fan-in path happens **only w
 | Trigger | Resulting coordination |
 |---|---|
 | A `WorkerCoordinationPacket.needs_manager_attention = true` | Fan-in Coordinator batches it into a bounded Manager replan |
-| One or more `ClarificationEscalation`s in a parallel group | Same batched Manager pass (§D.9.3) |
+| One or more `ClarificationEscalation`s in a wave | Same batched Manager pass (§D.9.3) |
 | Neither of the above | **No coordination step runs at all** — straight to merge/Integration Validator |
 
-**Bound:** at most **one** Manager coordination/replan pass per parallel group per attempt. If that pass's redispatch still fails validation, the task proceeds through the normal `FL-04`/`FL-05`/Feedback Agent escalation chain (§D.5, §D.8) rather than triggering a second ad-hoc coordination round. A dedicated "coordination window" phase between decomposition and implementation, or between implementation and merge, that runs unconditionally on every task was evaluated and rejected (§D.9.7) — it taxes every Low-risk task with LLM rounds that, empirically, most tasks never need.
+**Bound:** at most **one** Manager coordination/replan pass per **wave** per attempt. If that pass's redispatch still fails validation, the task proceeds through the normal `FL-04`/`FL-05`/Feedback Agent escalation chain (§D.5, §D.8) rather than triggering a second ad-hoc coordination round.
 
 ### D.9.7 Communication Non-Goals (Reject on Sight)
 
@@ -1128,14 +1516,14 @@ The following are explicitly out of scope for this architecture. Naming them her
 - **Swarm or emergent multi-agent coordination** for any core SDLC workflow (see the platform's own decentralized-patterns evaluation — swarm/peer-to-peer/voting/auction/full consensus were assessed and rejected for the control plane).
 - **Debate architectures as a default mechanism.** (Bounded, opt-in design-debate for Critical/High-risk design exploration remains a *separate*, policy-gated research track — it is not part of this communication protocol and does not relax the worker-isolation invariant.)
 - **Always-on coordination meetings/windows** that run unconditionally on every task (§D.9.6).
-- **Recursive worker spawning** — only Managers hold `Send` authority (§D.9.5).
-- **An LLM-driven Merge Resolution Agent** that creatively resolves conflicting diffs. Merge conflicts are handled deterministically by the Fan-in Coordinator (overlap/semantic-conflict detection → serialize-and-rerun), never by asking a model to reconcile two diffs into one. This is a correctness and auditability decision, not an oversight: an auto-merged "creative" resolution is exactly the kind of silent, unverifiable change Principle 5 (deterministic/auditable over clever) exists to prevent.
+- **Recursive worker spawning** — only the Wave Scheduler may `Send`; only Managers hold coordination authority (§D.9.5).
+- **An LLM-driven Merge Resolution Agent** that creatively resolves conflicting diffs. Merge conflicts are handled by Fan-in **wave demotion** (§D.4.4), never by asking a model to reconcile two diffs into one. This is a correctness and auditability decision, not an oversight: an auto-merged "creative" resolution is exactly the kind of silent, unverifiable change Principle 5 (deterministic/auditable over clever) exists to prevent.
 - **Using `messages` (§B.2) as an inter-agent bus.** It is the human/system conversation transcript only (§B.2's field comment) — agent coordination has its own typed channels (`worker_coordination_packets`, `clarification_escalations`, `feedback_reports`).
 
 ### D.9.8 Worker Lifecycle
 
 ```
-Created (Send dispatch from Manager)
+Created (Send dispatch from Wave Scheduler)
    │
    ▼
 Running (progressive RI context, sandboxed diff generation in isolated worktree, §D.4.3)
@@ -1198,6 +1586,586 @@ Cancellation is orthogonal to code rollback (§D.6) — cancelling a task does n
 
 
 
+## D.10 Dynamic Execution Topology (Development Phase)
+
+This section specifies the complete architecture for runtime topology selection in the Development phase. Everything in §D.4 is the wave executor; this section is the layer that decides the wave schedule.
+
+### D.10.1 One executor, not three code paths
+
+**PARALLEL, SEQUENTIAL, and HYBRID are not modes — they are shapes of the same `ExecutionPlan`.**
+
+- PARALLEL = no blocking edges in the SDG (independent set; may still be split into multiple waves by width cap only) — see §D.10.3 `topology_class` rules
+- SEQUENTIAL = every active wave has `width == 1`
+- HYBRID = blocking edges exist **and** more than one wave with mixed structure
+
+`topology_class` is a *derived label* for telemetry/evaluation only. It never switches code paths. The wave executor (§D.4.0) handles all three identically.
+
+#### D.10.1.1 OLD → NEW Development execution (normative)
+
+**OLD (V3.0):**
+```
+Manager → TaskDecomposition (WHAT only; no schedule field)
+       → Send
+       → workers → Validator
+       → Fan-in (per parallel group)
+       → Integration Validator
+```
+
+**NEW (Rev 3.1):**
+```
+Manager → TaskDecomposition (WHAT + declared_dependencies)
+       → Topology Selector / plan_execution_waves (WHEN)
+       → ExecutionPlan + TopologyDecisionRecord
+       → Wave Scheduler (sole mechanical Send per wave)
+       → workers → Validator
+       → Fan-in per wave (merge / demotion / amendment / WaveHandoffNote)
+       → next wave …
+       → Integration Validator (once)
+```
+
+| | Removed / deprecated | Unchanged | Introduced |
+|---|---|---|---|
+| Schedule | `TaskDecomposition.execution_order` (removed) | Manager decomposition, WCP, isolation, Blackboard, worktrees, per-branch Validator | SDG, Topology Selector, ExecutionPlan, Wave Scheduler, per-wave Fan-in, WaveHandoffNote, demotion SM, plan amendment |
+| Runtime | Three mental “modes” | LangGraph Pregel / `Send` / checkpoints | Topology layer *above* LangGraph (plan is data; compiled graph stays static) |
+
+**Why above LangGraph:** BSP + `Send` + checkpoints remain correct primitives. LangGraph edges are not dependency constraints. The SDG lives in state; the Scheduler loop is the minimal adapter.
+
+---
+
+### D.10.2 Features that drive the topology decision
+
+Features are categorised by measurement reliability.
+
+**Tier A — Static, cheap, pre-dispatch (available before any worker runs):**
+
+| Feature | Source | How it influences topology |
+|---|---|---|
+| Sub-task declared dependency count / density | `TaskDecomposition.tasks[].declared_dependencies` | High density → narrower waves |
+| File-set pairwise overlap across sub-tasks | RI `get_file_structure` + `ownership_map` | Any overlap forces serial ordering of overlapping pair |
+| Symbol-set overlap (interface consumers / producers) | RI `get_callers` / `get_callees` (depth 1) | Produces `produces_interface` edges |
+| Shared resource detection | Architecture summary L0: DB entities, APIs, config, protos | Produces `shared_resource` edges |
+| Sub-task count | `len(TaskDecomposition.tasks)` | Very high count → aggressive width cap |
+| Repo-map overlap coefficient | Personalized PageRank map overlap between sub-task seed sets | High coefficient → increase serial ordering |
+| DAG topological height | Computed from declared + RI-verified edges | Height > threshold → sequential or narrow hybrid |
+| `WorkflowProfile.max_parallelism` | §F.2 | Hard upper bound on wave width |
+| Risk tier | `Task.risk_tier` | CRITICAL → hard gate width 1 (TP-03); HIGH → soft cap 2 (TP-05) |
+| Change size estimate | `RI.get_impact_set()` over declared target files | Large blast radius → prefer serial |
+
+**Tier B — Runtime-discovered (available mid-execution, triggers plan amendment):**
+
+| Feature | Source | Effect |
+|---|---|---|
+| WCP `discovered_dependencies` | Worker output on branch exit | New `discovered` blocking edge → plan amendment |
+| WCP `interface_changes` conflicting with peer assumptions | Fan-in semantic conflict check | May trigger wave demotion |
+| `ClarificationEscalation` revealing scope overlap | Worker stop + escalation | May trigger Manager replan of undispatched sub-tasks |
+
+**Tier C — Historical / learned (Phase 15+, optional):**
+
+| Feature | Source | Future use |
+|---|---|---|
+| Per-module failure frequency | `regression_history` | Down-weight parallelism for high-failure modules |
+| Past conflict rate for similar task-type | `TopologyDecisionRecord` history | Calibrate default width cap |
+| Past re-plan rate | `feedback_loop_events` | Increase serial preference for task patterns with high replan rate |
+
+**Tier A features drive the MVP implementation.** Tier B is the plan amendment path. Tier C is experimental, gated on Phase 15 data volume, and governed by `resolve_workflow_profile()` rule updates (§F.3), not embedded in the topology selector itself.
+
+### D.10.3 `plan_execution_waves()` — the deterministic scheduler
+
+`plan_execution_waves()` is a pure function in `packages/orchestration/topology_selector.py`.
+
+**Signature:**
+```text
+plan_execution_waves(
+  decomposition: TaskDecomposition,
+  sdg: SubtaskDependencyGraph,          # may be built inside; RI adapter injected
+  profile: WorkflowProfile,             # §F.1 — includes max_parallelism
+  ctx: WorkflowContext,                 # §F.2 — includes repo_scale, max_parallel_impl_agents
+  task: Task,                           # risk_tier, confidence_score (§B.1 / §B.4)
+) -> tuple[ExecutionPlan, TopologyDecisionRecord]
+```
+
+**No LLM call.** The Manager decides *what*; this function decides *when*.
+
+#### Inputs — exact sources (no guessing)
+
+| Input | Source | Available at planning time? | Notes |
+|---|---|---|---|
+| `declared_dependencies` | `TaskDecomposition.tasks[]` | Yes | Manager output |
+| File/symbol/shared-resource facts | RI queries (§D.10.7 budget) | Yes if `ri_available` | Else hard gate TP-01 |
+| `task.risk_tier` | `Task.risk_tier` | Yes | Intake / policy |
+| `task.confidence_score` | `Task.confidence_score` from Confidence Model (§B.4), as of Design→Implementation handoff | Yes | If scorer failed → `None` or value `< 0.70` → TP-02 width=1. Distinct from §B.4 Implementation floor **0.75** (model-tier escalate). |
+| `ctx.repo_scale` | `WorkflowContext.repo_scale` (§F.2): `small(<1k)` \| `medium(<10k)` \| `large(<100k)` \| `enterprise(100k+)` | Yes | Until Phase 10: derive from RI file-count heuristic in `build_workflow_context` subset; default `medium` if unknown (do **not** default to `small`) |
+| `profile.max_parallelism` | `WorkflowProfile.max_parallelism` | Yes | Until Phase 10: `most_conservative()` → `2` |
+| `ctx.max_parallel_impl_agents` | computed from `repo_scale` (§F.2) | Yes | enterprise 8 / large 5 / medium 3 / small 2 |
+
+**Removed:** `manager_suggestion` — undefined and redundant. The Manager influences schedule only via declared dependencies and decomposition shape, not via an opaque width hint.
+
+#### Algorithm
+
+```
+plan_execution_waves(...):
+
+  Step 1 — Seed SDG from Manager declared edges (kind="declared", blocking=True)
+
+  Step 2 — RI-verify / augment (budget §D.10.7)
+     Confirm or refute declared edges; add file_overlap / symbol_overlap /
+     produces_interface / shared_resource edges found by RI.
+     Cycle detect → Fail-Closed: no plan dispatched; Manager replan (§D.10.9).
+     Set sdg.ri_available appropriately.
+
+  Step 3 — Compute max_wave_width via TP policy (below)
+
+  Step 4 — Levelize (correctness)
+     Level 0 = nodes with no blocking predecessors among remaining nodes
+     Level k = nodes whose latest blocking predecessor is in level k-1
+     Within level: HLF order (upward rank = critical-path length)
+
+  Step 5 — Apply width cap (scheduling only)
+     Split any level with size > max_wave_width into consecutive waves,
+     preserving HLF order. Splits do NOT invent blocking edges.
+
+  Step 6 — Derive topology_class (label only) — see exact rules below
+     Build ExecutionPlan + TopologyDecisionRecord
+```
+
+#### TP-01 → TP-08 — implementation-ready policy
+
+**Design:** two phases. Hard gates are exclusive (first match → `max_wave_width = 1`, stop). Soft caps all apply via `min` (never widen).
+
+```
+profile_bound = min(profile.max_parallelism, ctx.max_parallel_impl_agents)
+
+# ── HARD GATES (ordered, first-match-wins, exclusive) ───────────────
+# Each forces fully sequential scheduling when independence cannot be trusted.
+
+TP-01  RI unavailable
+       condition: sdg.ri_available == False
+       action:    max_wave_width = 1
+       prevents:  parallelizing without verifying file/symbol independence
+       if info N/A: this *is* the N/A case
+
+TP-02  Low / missing confidence
+       condition: task.confidence_score is None OR task.confidence_score < 0.70
+       action:    max_wave_width = 1
+       prevents:  wide fan-out when requirements/design confidence is weak
+       source:    §B.4 Fail-Closed — missing score is never imputed as high
+       NOTE:      0.70 is the *topology width* gate (YAML). Distinct from
+                  Implementation phase confidence floor 0.75 which escalates
+                  *model tier* (§B.4 / §F.3). Do not merge these knobs.
+
+TP-03  Critical risk
+       condition: task.risk_tier == CRITICAL
+       action:    max_wave_width = 1
+       prevents:  concurrent edits on irreversible / highest-blast-radius work
+       NOTE:      Resolves prior contradiction: CRITICAL is width 1, not 2.
+
+TP-04  Small repository
+       condition: ctx.repo_scale == "small"
+       action:    max_wave_width = 1
+       prevents:  coordination overhead dominating tiny codebases
+       if unknown: do not fire (default repo_scale="medium")
+
+# If any hard gate fired → skip soft caps; final-width formula still records profile/ctx.
+
+# ── SOFT CAPS (all matching contribute; take min with profile_bound) ─
+candidates = [profile_bound]
+
+TP-05  High risk
+       condition: task.risk_tier == HIGH
+       contributes: 2
+
+TP-06  Shared resource coupling
+       condition: SDG has ≥1 edge with kind="shared_resource" AND blocking=True
+       contributes: 2
+       advisory-only shared_resource edges do NOT fire TP-06
+
+TP-07  Deep dependency DAG
+       condition: topological height of blocking SDG ≥ 5
+       contributes: 3
+
+TP-08  Default / large fan-out pressure
+       condition: always evaluated when no hard gate fired
+       contributes: ceil(sqrt(subtask_count)) if subtask_count ≥ 8 else 4
+
+max_wave_width = min(candidates ∪ {contributions from TP-05..TP-08 that match})
+# TP-08 always matches in the soft phase, so there is always a finite soft value.
+policy_rules_fired = [hard id] OR [each soft id whose contribution equals the min among soft+profile candidates]
+```
+
+#### Final-width formula (the only width math)
+
+Four numbers exist. They are **not** four independent schedules. They compose as:
+
+```
+profile_bound       = min(profile.max_parallelism, ctx.max_parallel_impl_agents)
+tp_width            = 1 if a hard gate fired else min(soft contributions ∪ {profile_bound})
+max_wave_width      = tp_width   # stored on ExecutionPlan; Step 5 splits levels to this cap
+dispatch_concurrency = min(max_wave_width, fleet_available, remaining_budget_workers)
+                     # runtime only; does NOT change ExecutionPlan.waves
+
+width_cap_source = (
+  f"final={max_wave_width}"
+  f"|profile={profile.max_parallelism}"
+  f"|ctx={ctx.max_parallel_impl_agents}"
+  f"|hard={hard_id or 'none'}"
+  f"|soft={'+'.join(f'{id}:{n}' for each matching soft cap)}"
+)
+```
+
+If `profile.execution_order == "sequential"` (hotfix Rule 2, §F.3), treat as an extra hard gate **before** TP-01…TP-08: `max_wave_width = 1`, `hard=profile.execution_order`. `WorkflowProfile.execution_order` is an existing workflow scheduling preference / hotfix gate — **not** `ExecutionPlan.topology_class` (derived label). Keep the field name for compatibility; do not rename or replace it with `topology_class`.
+
+**What TP rules may / may not do:**
+
+| May | Must not |
+|---|---|
+| Cap / reduce `max_wave_width` | Remove or ignore a blocking SDG edge |
+| Force serialization (width 1) via hard gate | Invent new subtasks |
+| Cause Step 5 to split an independent level | Call an LLM |
+| Record into `TopologyDecisionRecord` | Override `profile_bound` upward |
+
+**DAG correctness vs TP conservatism:** Steps 1–2–4 are correctness. Step 3 + Step 5 are scheduling policy. A blocking edge always wins over a desire for width.
+
+#### `topology_class` derivation (exact)
+
+```
+blocking = SDG has ≥1 blocking edge
+widths = [w.width for w in waves]
+
+if all(w == 1 for w in widths):
+    topology_class = "sequential"
+elif not blocking:
+    # Independent set only — including the case where Step 5 split a wide
+    # independent level under a width cap. Still "parallel" for evaluation:
+    # no dependency-forced serialization occurred.
+    topology_class = "parallel"
+elif len(waves) == 1:
+    topology_class = "parallel"
+else:
+    topology_class = "hybrid"
+```
+
+This removes the ambiguity where width-cap splits incorrectly looked like hybrid dependency structure.
+
+#### Concrete SDLC validation example
+
+Task: soft-delete Users. `risk_tier=MEDIUM`, `confidence_score=0.85`, `repo_scale=large`, `profile.max_parallelism=5`, `max_parallel_impl_agents=5`, RI up.
+
+Subtasks: A=migration, B=model (dep A), C=repo (dep B), D=API (dep C), E=admin UI (independent).
+
+```
+Hard gates: none
+Soft: TP-08 → 4; profile_bound=5 → max_wave_width=4
+Levels: L0={A,E} L1={B} L2={C} L3={D}
+Waves: [A,E] [B] [C] [D] → topology_class=hybrid
+policy_rules_fired=["TP-08"]
+```
+
+If `risk_tier=CRITICAL` → TP-03 → all width 1 → sequential.  
+If RI down → TP-01 → sequential.  
+If `risk_tier=HIGH` → soft min(5,2,4)=2 → L0 may become [A][E] if both present, etc.
+
+#### D.10.3.1 TP rules are configuration, not LLM and not code-scattered magic numbers
+
+**What a TP rule is:** a named, ordered, deterministic predicate that contributes to `max_wave_width`. It is **not** an agent, **not** a LangGraph node, and **not** a model call.
+
+**Who defines it:** platform policy in `configs/topology_policy.yaml` selected by `WorkflowProfile.topology_policy_id` (default `"default"`). The evaluator is `packages/orchestration/topology_policy.py` — pure functions. Engineers change thresholds in YAML; they do not prompt an LLM.
+
+**When it executes:** only inside `plan_execution_waves()` Step 3 — at initial plan, and again on amendment/demotion re-levelize of **remaining** work (hard gates still apply; width must not increase vs the attempt's original `max_wave_width`).
+
+**What it reads:** Task, WorkflowContext, WorkflowProfile, SDG — already on `SDLCState` / injected adapters. Zero LLM.
+
+**What it changes:** `max_wave_width` only (then Step 5 may split levels).
+
+**What it cannot change:** SDG edges, subtask list, `topology_class` (derived later), git, WCP.
+
+**DAG interaction:** blocking edges always win. TP never deletes an edge. A width cap cannot co-schedule a predecessor with its successor.
+
+**`max_parallelism` interaction:**
+```
+profile_bound = min(profile.max_parallelism, ctx.max_parallel_impl_agents)
+max_wave_width = min(profile_bound, tp_result)
+```
+TP cannot raise the profile bound.
+
+**Invariant (not YAML-overridable):** TP-01 (RI unavailable → width 1) and "amendments never widen" cannot be disabled. A policy file that sets `allow_parallel_without_ri: true` is a load-time validation error.
+
+**Additional hard gate from existing workflow engine (not a new LLM):** included in the final-width formula above (`profile.execution_order == "sequential"`).
+
+Default YAML (numbers match the TP ladder above):
+
+```yaml
+# configs/topology_policy.yaml
+id: default
+hard_gates:
+  tp01_ri_unavailable: { enabled: true }          # not overridable to false
+  tp02_confidence_floor: 0.70
+  tp03_critical_width1: true
+  tp04_small_repo_width1: true
+soft_caps:
+  tp05_high_risk_width: 2
+  tp06_shared_resource_width: 2
+  tp07_deep_dag: { height_threshold: 5, width: 3 }
+  tp08_default_width: 4
+  tp08_sqrt_fanout_from: 8
+```
+
+Phase 15 may ship alternate files (`conservative.yaml`, `throughput.yaml`) behind `topology_policy_id`. Changing a file is an **experiment** (§L.8): bump `orchestration_version`, replay golden set. The selector remains deterministic given (decomposition, SDG, profile, ctx, task, policy file).
+
+---
+
+### D.10.4 Dispatch concurrency vs. plan width
+
+**These are two separate numbers.** `ExecutionWave.width` is the number of sub-tasks *allowed* to run in parallel according to the dependency plan — it is determined ahead of time and recorded in the `TopologyDecisionRecord`. `ExecutionPlan.dispatch_concurrency` is the number that actually run simultaneously at the moment the Wave Scheduler dispatches a wave — it is set at runtime and constrained by agent fleet capacity, the `Task.budget.token_ceiling`, and kill-switch state.
+
+`dispatch_concurrency ≤ width` always. Reducing `dispatch_concurrency` for capacity reasons does **not** change the plan (no plan amendment, no new `TopologyDecisionRecord`), because the plan states independence — independent sub-tasks may be dispatched in any order within a wave. Reducing `width` itself requires a plan amendment (§D.10.5) because it implies a new blocking edge was discovered.
+
+This separation is what makes plans reproducible for evaluation (§L.8): the plan is a deterministic function of the SDG and the policy rules; the concurrency level is an ephemeral runtime detail. Exact composition of `max_wave_width` vs `dispatch_concurrency` is the **final-width formula** in §D.10.3.
+
+Narrowing `max_wave_width` on amendment/replan is allowed (fail-closed). Widening it is forbidden.
+
+### D.10.5 Plan amendment vs demotion vs Manager replan vs escalation
+
+These mechanisms are **not** interchangeable. Demotion is a *subtype* of plan amendment that also supersedes executed attempts.
+
+| Mechanism | Trigger | Owner | LLM? | Changes DAG? | Changes remaining active plan? | Example |
+|---|---|---|---|---|---|---|
+| **ClarificationEscalation** | Worker cannot safely continue | Worker emits; Fan-in batches | No (emit) | Not by itself | Only after Manager resolves | Missing symbol; broken assumption |
+| **Plan amendment** (pure) | New blocking dep affects **only undispatched** subtasks (WCP `discovered_dependencies`) | Fan-in → `plan_execution_waves` on remainder | No | **Add-only** blocking edges | Yes — re-levelize remaining; `plan_version++` | Wave0 discovers E needs C; E not started |
+| **Wave demotion** | Conflict among **executed** validated branches in current wave | Fan-in (§D.4.4) | No | Add-only discovered edges | Yes — supersede attempts + rewrite remaining (amendment subtype) | A,B file overlap after both validated |
+| **Manager replan** | Escalations / `needs_manager_attention` / amendment cap / cycles / demotion abort / cross-wave vs already-merged | Implementation Manager | **Yes** | May rewrite decomposition (WHAT) | Yes — new plan; completed waves frozen in `ReplanContext` | Circular semantic conflict |
+
+**Amendment invariant (all amendment subtypes):** may only **add** blocking edges, never remove them; may not widen `max_wave_width`; `plan_amendment_count ≤ max_plan_amendments` (default 3) else escalate to Manager replan.
+
+**Completed waves:** never re-levelized, never unmerged by amendment/demotion.
+
+---
+
+### D.10.6 WaveHandoffNote assembly
+
+At the close of wave K, after `merge_eligible` branches have been merged (or skipped if none), the Fan-in Coordinator assembles a `WaveHandoffNote` for wave K+1.
+
+**Assembly algorithm (deterministic, zero LLM calls):**
+
+```
+inputs:
+  merge_eligible WCPs for sub-tasks in waves 0..K (highest attempt per subtask_id)
+  existing WaveHandoffNotes for waves 0..K-1
+  # blocked/failed/ignore-keyed attempts are excluded
+
+1. Merge interface_changes across all completed WCPs:
+   - Group by symbol_id; on conflict (two sub-tasks both claim a change to the same symbol):
+     → retain both entries, mark both with status="conflict", add to unresolved_issues
+   - Non-conflicting: deduplicate by symbol_id, keep latest by wave_index
+
+2. Merge files_touched:
+   - Union of all touches_files across all completed WCPs
+   - Deduplicated
+
+3. Merge discovered_dependencies:
+   - Union, deduplicated by symbol_id format
+
+4. Merge constraints_for_next_waves:
+   - Collect from WCP.risks (short strings only)
+   - Collect from still-open ClarificationEscalation items
+
+5. Priority-truncate to token_budget (§B.5 "wave → wave" row):
+   Priority order (highest to lowest):
+     a. interface_changes with status="conflict"
+     b. unresolved_issues
+     c. interface_changes without conflict
+     d. constraints_for_next_waves
+     e. files_touched (drop to count only if over budget)
+     f. discovered_dependencies
+   Set truncated=True if any item was dropped; dropped items' Blackboard refs appended to artifact_refs
+```
+
+**Default token budget for wave-to-wave handoff:** 2,000 tokens. Rationale: a worker receiving this note needs the interface and constraint delta, not a full project summary. The ledger (§H.5) already provides the authoritative historical record; the note is the *incremental* update from the most-recently-closed waves.
+
+### D.10.7 Repository Intelligence query budget for topology selection
+
+Topology selection must not become a full-repository scan. RI queries in `plan_execution_waves()` are bounded:
+
+| Query type | Budget per call | Max calls per plan |
+|---|---|---|
+| `get_file_structure(file)` | 1 | `min(50, total_owned_files)` |
+| `get_callers(symbol, depth=1)` | 1 | `min(20, total_declared_symbols)` |
+| `get_dependents(file)` | 1 | `min(20, total_owned_files)` |
+| `get_impact_set(files)` | 1 (batched) | 1 |
+| Architecture summary | 1 (cached) | 1 |
+
+Total RI calls capped at 50 per plan. If the sub-task count or symbol count would require more, sample the highest-risk pairs (by declared dependency count) and flag the unqueried pairs as `advisory` edges rather than `confirmed`. This preserves the Fail-Closed property: unconfirmed edges are treated as if they exist, making the schedule more conservative, not more aggressive.
+
+### D.10.8 Sub-agent spawning — rejected for MVP and Phase 2
+
+**Decision:** worker-spawned sub-agents are not supported.
+
+**Problem it claims to solve:** a sub-task too large for one worker.
+
+**Why rejected:**
+
+- The problem is already solved at zero architectural cost. If a sub-task is too large, the worker raises `ClarificationEscalation(category="scope_ambiguity")` and the Manager re-decomposes the sub-task into finer-grained items in the next wave. This is exactly the "Worker discovers a sub-task needs to be split" case — handled by the existing escalation + replan path.
+- Worker-spawned sub-agents break `max_parallelism` enforcement. Only Wave Scheduler may `Send`; uncontrolled recursive spawning makes width caps meaningless.
+- Depth-2 hierarchies (Manager → Worker) already carry a coordination penalty. Depth-3 (Manager → Worker → Sub-Worker) multiplies that penalty.
+- Attribution accuracy at depth-3 would fall further below the already-concerning 53.5% (manager + tool attribution) and 14.2% (step attribution) figures cited in the empirical literature.
+
+**Future:** if depth-3 delegation is added, it must be bounded at every level: `max_depth=2` (current level), `max_children=3`, budget propagation (child budget ≤ remaining parent budget), and scope restriction (child may only operate within its parent worker's assigned file/symbol scope). This is a Phase 3 item, gated on Phase 15 evaluation data showing that the current escalation path is a genuine throughput bottleneck.
+
+### D.10.9 Fail-Closed behaviour for topology selection
+
+**If `plan_execution_waves()` cannot complete safely, the schedule defaults to fully sequential (width 1 for all waves).** This is the Principle 8 (§A.2) application to topology: an uncertain plan narrows parallelism, never widens it.
+
+Specific triggers:
+
+| Condition | Fail-Closed behaviour |
+|---|---|
+| RI unavailable or timeout during dependency verification | `sdg.ri_available=False`; set all unverified edges to `blocking=True`; `topology_class=sequential` |
+| Cycle detected in SDG | Escalate to Manager replan; if replan also produces a cycle: HITL. Never dispatch a cyclic plan. |
+| `plan_amendment_count` cap exceeded | Escalate to Manager replan |
+| `task.risk_tier == CRITICAL` | Width cap = 1 (hard gate TP-03) |
+| `confidence_score is None or < 0.70` | Width cap = 1 (hard gate TP-02) |
+| Any `SubtaskDependencyEdge` fails schema validation | Treat as blocking edge (Fail-Closed) |
+
+---
+
+
+
+## D.10.10 Multi-wave lifecycle — developer walkthrough
+
+### What creates Wave 0
+`plan_execution_waves` emits `ExecutionPlan.waves[0]`. Wave Scheduler sets `current_wave_index=0` and returns `Send` for each id in that wave (subject to `dispatch_concurrency`).
+
+### What makes a wave complete
+Every branch in the wave has terminal `ImplementationResult` with status in `{validated, blocked, failed}` (retries finished). Mid-FL-04 does not complete the wave.
+
+### Fan-in before next wave
+Runs decisions 1–10 (§D.4.1): select → intra/cross checks → merge eligible → demote/amend if needed → assemble `WaveHandoffNote` → advance index or exit.
+
+### State carried forward
+- Git: integration worktree HEAD
+- Notes: latest `WaveHandoffNote` for `for_wave = next`
+- Ledger: Context Ledger entries (T1)
+- Plan: active `ExecutionPlan` at current `plan_version`
+- Not carried as prompt bulk: raw diffs, full WCP lists, tool traces
+
+### Worker failure
+FL-04 on that branch; siblings continue; Fan-in waits for terminal states.
+
+### Dependency discovered (undispatched only)
+Pure plan amendment (§D.10.5).
+
+### Conflict discovered among executed peers
+Wave demotion SM (§D.4.4).
+
+### Cycle detected
+At planning or demotion orient: Manager replan; else HITL. Never dispatch cyclic active plan.
+
+### Example A — Pure parallel
+Subtasks A,B,C independent; RI confirms; soft cap width≥3.
+Active plan: `Wave0=[A,B,C]`, `topology_class=parallel`.
+One Fan-in; one WaveHandoffNote (optional if no further waves); Integration Validator.
+
+### Example B — Pure sequential
+A→B→C blocking chain (or hard gate TP-01/02/03/04).
+Active plan: `[A][B][C]`, `topology_class=sequential`.
+After A merges, B receives WaveHandoffNote covering wave 0; base = integration HEAD.
+
+### Example C — Hybrid
+A=migration, B=model(dep A), C=API(dep B), D=UI(independent), E=docs(independent).
+Waves: `[A,D,E] → [B] → [C]` (if width cap ≥3), `topology_class=hybrid`.
+
+### Example D — Demotion
+Planned `Wave0=[A,B]`; both validate; file overlap.
+History: demotion event; attempts superseded.
+Active plan becomes `[A]→[B]` with discovered edge; not `[A,B]+[B]`.
+
+---
+
+
+## D.10.11 LLM call budget — layers are not extra model calls
+
+**Challenge the diagram.** `Manager → DAG → Topology Selector → Wave Scheduler` is a *data-flow*, not four agents. Treating each box as an LLM would multiply cost with no quality gain. This section is the production call architecture.
+
+### Comparison (choose B)
+
+| Option | Happy-path Implementation LLMs (excluding CodeGen workers) | Verdict |
+|---|---|---|
+| **A. Naive reading of four boxes** | Manager + topology LLM + scheduler LLM + fan-in LLM | Reject. Fan-in/scheduler have no judgment that a model improves. |
+| **B. One Manager structured call + deterministic topology (CHOSEN)** | **1** High-capability structured-output call | Matches Principle 5; same LLM count as V3.0 Manager decomposition |
+| **C. Manager + LLM topology planner** | 2 High-capability calls | Reject. Topology is a graph algorithm. A second model would be untestable, non-reproducible, and empirically worse at "who may run with whom" than RI + TP policy (CooperBench: comms don't fix semantic coordination). |
+| **D. Manager ReAct loop that also queries RI then "decides" waves** | 1 call *plus* N tool-round-trips (often 5–15 extra LLM steps) | Reject as default. RI queries belong in Python. ReAct burns tokens re-deriving `get_callers` the selector already runs on a budget. |
+
+**Chosen: B.** The DAG/hybrid design adds **zero** happy-path LLM calls versus V3.0. It adds CPU (topo-sort, RI lookups, Fan-in).
+
+### What MUST use an LLM vs what MUST NOT
+
+| Component | LLM? | Why |
+|---|---|---|
+| Implementation Manager **initial decompose** | **Yes — exactly one structured call** | Inventing subtasks/scopes is a reasoning job. Output schema = `TaskDecomposition` only. |
+| Manager RI tool loop during decompose | **No (default)** | Inject L0 architecture summary + design packet into the prompt; do **not** give the Manager `get_callers`/`get_dependents` as tools on this call. Selector verifies. |
+| DAG construction / RI verify / overlap | **No** | Tree-sitter + RI point lookups (§D.10.7). |
+| TP-01…TP-08 | **No** | Config-driven deterministic policy (§D.10.3.1). |
+| `plan_execution_waves` / topology_class | **No** | Pure function. |
+| Wave Scheduler / `Send` | **No** | LangGraph control flow. |
+| Fan-in, demotion, amendment, WaveHandoffNote | **No** | Deterministic. |
+| `Validator`(implementation) | **No** | Tools only. |
+| CodeGen × wave width | **Yes — one worker trajectory per subtask** | Unavoidable. WCP fields MUST be the same structured call as the diff (§D.9.2), not a second round-trip. |
+| Integration Validator | **Yes — one High-capability call with tools, once after last wave** | Needs judgment over merged contracts; tools do caller/test checks first. Not per wave. |
+| Manager **replan** | **Yes — at most one per wave per attempt**, only on escalation/cycle/amendment-cap | Do not replan to "pick a topology." |
+| Feedback Agent | **Yes — only after FL-04 ×3** | Already bounded. |
+| T3 compaction summarizer | **Yes — last resort** (Phase 12), wave-boundary, never for T1 ledger | Deterministic T2 clear first. |
+| WaveHandoffNote / Context Ledger extract | **No** | Projection from typed WCP/state. |
+| Confidence / risk_tier for TP | **No extra call** | `Task.confidence_score` is §B.4 formula; `Task.risk_tier` is intake. Manager MUST NOT invent replacements. |
+
+### Manager: one structured output (WHAT only)
+
+The Implementation Manager node runs as:
+
+```
+1. Assemble prompt (no tools):
+     ArchitectureDoc + PhaseHandoffPacket (Design→Implementation)
+     + L0 architecture summary (cached RI, not a tool loop)
+     + Task.risk_tier, Task.confidence_score (read-only context, not for the model to overwrite)
+2. ONE High-capability structured-output invocation → TaskDecomposition:
+     tasks[]: id, description, module, target_files, declared_dependencies, model_tier_hint
+     ownership_map
+     version
+   Optional per-subtask fields allowed: estimated_complexity (advisory ONLY for model_tier_hint)
+   Forbidden outputs: topology_class, waves, max_wave_width, execution_order-as-schedule,
+                      confidence_score, risk_tier
+3. Python immediately calls plan_execution_waves(...)  # same graph node, zero extra LLM
+4. Write ExecutionPlan + TopologyDecisionRecord to SDLCState
+5. Return — Wave Scheduler issues Send on the next superstep
+```
+
+**Do not** combine Manager+CodeGen into one call: that destroys isolation, WCP, worktrees, and parallel width.
+
+**Do not** ask the Manager for a "risk estimate" that overrides `Task.risk_tier`. Complexity may only choose Fast vs High-capability **per subtask** (`model_tier_hint`); TP rules ignore complexity (Principle 10).
+
+### Happy-path call count (normal Development implementation attempt)
+
+Assume hybrid plan, 3 CodeGen subtasks, all pass Validator first try, no escalation:
+
+| # | Call | Tier |
+|---|---|---|
+| 1 | Implementation Manager structured decompose | High-capability × 1 |
+| 2–4 | CodeGen (one trajectory each; WCP in same call) | Fast or High × 3 |
+| 5 | Integration Validator | High-capability × 1 |
+
+**Total: 5 LLM trajectories.** Topology, TP, DAG, Scheduler, Fan-in, handoff: **0**.
+
+V3.0 parallel-only with 3 workers was also ~1 Manager + 3 CodeGen + 1 Integration Validator. Hybrid adds CPU, not models.
+
+Conditional extras (not happy path): FL-04 retries, Feedback Agent, Manager replan, MASC Check 3 (fast, `implementation_plan` only), Phase 12 T3 summarizer.
+
+### Large-repo cost control
+
+- Manager prompt: L0 + design packet — never the 100k-file graph.
+- RI in selector: ≤50 point queries (§D.10.7), advisory-blocking if over budget.
+- Workers: progressive tools, WaveHandoffNote ≤2k, ledger T1, not previous diffs.
+
+---
+
+
 # Part E — Agent Architecture
 
 
@@ -1230,7 +2198,7 @@ Validator:              # replaces N bespoke validator-agent classes
 - **Validators are always separate from the producing agent.**
 - **Human approval agents only at genuinely irreversible or high-blast-radius transitions.**
 - **Feedback Agent** is a named, distinct role — what happens after N consecutive failures on the same module (see §E.5).
-- **Only Managers spawn/reassign/replan work (§D.9.5).** A sub-agent that discovers it needs help raises a `ClarificationEscalation` (§D.9.3) and stops its own branch — it never spawns a helper worker, delegates to a peer, or reassigns scope itself. This is the same anti-sprawl discipline as the template rule above, applied to coordination authority rather than to class proliferation.
+- **Managers hold coordination authority; Wave Scheduler holds mechanical `Send` (§D.9.5).** A sub-agent that discovers it needs help raises a `ClarificationEscalation` (§D.9.3) and stops its own branch — it never spawns a helper worker, delegates to a peer, or reassigns scope itself.
 
 
 
@@ -1483,9 +2451,11 @@ class IntentTracker:
 
 | Agent                       | Responsibility                                                          | Input → Output                                                | Model Tier                                         | Tools                                                                                   | Exit / Failure                                                                                           |
 | --------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| **Implementation Manager**  | Decomposes design into tasks; dependency-aware execution ordering; pre-dispatch overlap check (§D.4.2) before `Send` | Approved design → TaskDecomposition                           | High-capability                                    | `get_dependencies`, `get_dependents`                                                    | Exit: no circular deps; all components covered; no obvious file overlap in same parallel group. Failure: overlapping ownership → resolve before dispatch |
+| **Implementation Manager**  | **One** structured-output LLM call: TaskDecomposition (WHAT). Then **Python** `plan_execution_waves()` in the same node. No RI tool loop on this call. Coordination authority only (§D.9.5). | Approved design + L0 summary + handoff packet → TaskDecomposition; selector writes ExecutionPlan | High-capability **×1** (happy path) | **None on decompose call.** RI is injected into the selector, not the Manager. | Exit: cycle-free SDG after selector. Failure: cycle / schema fail → bounded replan (second LLM) or HITL |
+| **Topology Selector**       | Deterministic `plan_execution_waves` + TP policy YAML (§D.10.3) | TaskDecomposition + RI + profile + ctx + task → ExecutionPlan | — | RI point lookups (§D.10.7) | Same node as Manager after LLM returns; not a separate agent |
+| **Wave Scheduler**          | Mechanical `Send` per active wave (§D.9.5) | ExecutionPlan.waves[i] → Send[] | — | None | Not an LLM |
 | **CodeGen Sub-agent (×N)**  | Implements one module/scope per instance (parallel via Send API); emits `WorkerCoordinationPacket` on exit (§D.9.2), or `ClarificationEscalation` + stops (§D.9.3) if blocked | Module spec + progressive context → diff + WCP                | Fast (simple) / High-capability (complex refactor) | `get_symbol_signature`, `get_symbol_body`, `get_callers`, `get_file_structure`, sandbox | Exit: diff + WCP produced; self-check clean. Failure 3×: Feedback Agent. Never contacts another CodeGen instance directly (§D.9.1) |
-| **Fan-in Coordinator**      | Deterministic (not an agent, not an LLM call) — overlap + WCP semantic-conflict detection, merge/serialize decision, replan trigger (§D.4.1) | All branch diffs + WCPs → merge-eligible set or serialize/replan instruction | — (no model call) | File-set/diff analysis, `WorkerCoordinationPacket` fields | Exit: clean merge or all conflicts serialized/replanned. Never silently auto-merges |
+| **Fan-in Coordinator**      | Deterministic (not an agent, not an LLM) — per-wave boundary §D.4.1 | Branch diffs + WCPs → merge / demotion / amendment / handoff | — (no model call) | File-set/diff analysis, WCP fields, RI caller cross-check (tools, not LLM) | Exit: clean merge or demotion/replan. Never silently auto-merges |
 | `Validator`(implementation) | Static validation: lint/type/security (independent of CodeGen); **runs per branch before Fan-in** (§D.4.0) | Branch diff → pass/fail + findings                                   | None (tools only)                                  | ruff, mypy, Semgrep                                                                     | Failure: FeedbackReport to CodeGen sub-agent (FL-04); 3× max                                                     |
 | **Feedback Agent**          | Synthesizes root cause of repeated failure; proposes different approach | `ReplanContext` (failure history, WCPs, episodic memory) → revised task instructions | High-capability                                    | Episodic memory                                                                         | Trigger: N consecutive failures on same module. Failure: HITL escalation                                 |
 | **Integration Validator**   | Verifies new code integrates correctly; catches interface mismatches    | All merged diffs + interface contracts → pass/fail            | High-capability                                    | `get_callers`, `get_callees`, sandbox integration tests                                 | Failure: FeedbackReport to Implementation Manager                                                        |
@@ -1546,11 +2516,15 @@ Checkpoint = Literal["scope", "design", "security", "release", "pr", "deployment
 class WorkflowProfile(BaseModel):
     agent_set: list[str]              # which specialist/validator agents are active
     execution_order: Literal["sequential", "parallel_where_independent"]
+    # Existing workflow scheduling preference / hotfix gate (e.g. Rule 2 → "sequential").
+    # Kept for compatibility. NOT ExecutionPlan.topology_class.
+    # Topology Selector: if "sequential" → hard width-1 gate only (§D.10.3).
     qa_depth: Literal["minimal", "standard", "deep", "exhaustive"]
     model_tier: Literal["fast_cheap", "balanced", "frontier"]
     approval_requirements: list[Checkpoint]
     max_parallelism: int              # capped by repo_scale (§F.2)
     cost_budget_usd: float            # derived from risk tier and work type
+    topology_policy_id: str = "default"  # key into configs/topology_policy.yaml (§D.10.3.1)
 
     @classmethod
     def most_conservative(cls) -> "WorkflowProfile":
@@ -1564,8 +2538,11 @@ class WorkflowProfile(BaseModel):
             approval_requirements=["scope", "design", "release", "pr", "deployment"],
             max_parallelism=2,
             cost_budget_usd=20.0,
+            topology_policy_id="default",
         )
 ```
+
+`topology_policy_id` selects `configs/topology_policy.yaml` (schema §D.10.3.1). Phase 10 may point different risk/work-types at different policy files; evaluation never requires an LLM to choose a policy — `resolve_workflow_profile()` already returns the profile.
 
 **Phases 05–09 binding rule:** every `ApprovalGate.applies_when`, QA depth setting, and model tier assignment MUST behave as if `WorkflowProfile.most_conservative()` were resolved — do not hand-code shortcut paths in individual agents. Phase 10 replaces these hardcoded defaults with `resolve_workflow_profile()` call sites.
 
@@ -1633,11 +2610,13 @@ def resolve_workflow_profile(task: Task, ctx: WorkflowContext) -> WorkflowProfil
     # Rule 2 — Production hotfixes: never auto-merge, fast path, Bug Validation always runs
     if task.type == WorkType.HOTFIX and is_production(task.repo_refs):
         profile.approval_requirements += [DEPLOYMENT]
-        profile.execution_order = SEQUENTIAL_FAST_PATH
+        profile.execution_order = "sequential"
         profile.qa_depth = STANDARD_PLUS_BUG_VALIDATION
         return profile
     
     # Rule 3 — Low confidence (or scorer failed): escalate regardless of risk tier
+    # CONFIDENCE_FLOOR = workflow-routing approval gate (policy constant). Distinct from:
+    #   TP-02 topology width gate (0.70) and §B.4 Implementation floor (0.75 model-tier).
     if ctx.confidence_score < CONFIDENCE_FLOOR or ctx.confidence_score is None:
         profile.approval_requirements += [SCOPE, DESIGN]
         return profile
@@ -1847,7 +2826,7 @@ class ContextBundle(BaseModel):
 | Failure | Caller context | Behavior |
 |---|---|---|
 | RI timeout / unavailable | Worker mid-task | `ClarificationEscalation(ri_consulted=true)` with empty evidence; worker stops (`blocked=true`) |
-| RI timeout / unavailable | Fan-in semantic cross-check (§D.4.1.1 step 4) | Treat as conflict → serialize-and-rerun or Manager replan |
+| RI timeout / unavailable | Fan-in semantic cross-check (§D.4.1.1 step 4) | Treat as conflict → wave demotion if `|C|≥2`, else Manager replan |
 | RI timeout / unavailable | Confidence Scorer / MASC | Treat confidence as below floor → block / escalate (§B.4) |
 | RI returns empty for required query | Worker | Escalate via ClarificationEscalation — never guess |
 | Malformed RI response | Any | Fail-Closed → escalate; log `ValidationFlag(source="tool_error")` |
@@ -1916,18 +2895,172 @@ class ContextBudget:
 
 ## H.2 Aider-Style PageRank Repo Map
 
-The Aider codebase established a highly effective technique: build a map of the repo's most important files and symbols by computing PageRank over the codebase's import/reference graph. Files referenced by many other files rank higher. This gives a model a dense, token-efficient overview of what matters most in the codebase.
+The Aider codebase established a highly effective technique: build a map of the repo's most important files and symbols by computing PageRank over the codebase's **import/reference graph**. A file that is referenced by other *important* files ranks higher than one that is merely popular among leaves. That map is a dense, token-efficient overview of what matters — typically **~1,000–3,000 tokens** — instead of dumping files or LLM-summarizing the repo.
+
+**Critical refinement for this platform:** we do **not** inject a global “top files in the monorepo” map. Global PageRank on 100k files is nearly useless for a concrete task. We run **Personalized PageRank (PPR)** biased toward a **task seed set** derived from the current goal / input. Seeds pull probability mass toward the neighborhood that matters for *this* issue, wave, or agent; the map answers “given what we already know about this task, which nearby files/symbols should the model orient on?”
+
+### H.2.1 Graph we rank over
+
+| Element | Source | Notes |
+|---|---|---|
+| Nodes | Files (primary); optionally symbols for finer maps | File-level first; symbol-level only if token budget allows |
+| Directed edges | Import / `calls` / `references` from RI dependency graph | Same graph Phase 03 indexes and Phase 11 stores in Neo4j |
+| Edge weight | Default 1.0; optional boost for `calls` over weak `imports` | Keep v1 simple (unweighted) unless measured otherwise |
+| Scope | Per-shard subgraph containing seeds + k-hop closure | Never run PPR over the full federated graph |
+
+### H.2.2 From goal/input → seed set (this is how relevance enters)
+
+The Context Builder builds `RepoMapRequest` **once per agent invocation** (and again when seeds materially change: new wave, new WCP file list, localisation pass completes). Seeds are the only place task semantics enter PageRank.
 
 ```
-At context assembly time:
-  1. Get PageRank scores for all files in affected shard
-  2. Build repo map: top-K files by PageRank, with their key symbols and signatures
-  3. Inject map into design and implementation agent contexts as Level 0.5 context
-     (after architecture summary, before progressive expansion)
+SeedCollection (ordered, de-duped, capped at N_seed_max = 12):
 
-Token cost: ~1,000–3,000 tokens
-Value: model understands which files matter before retrieving any specific content
+  S1. Explicit paths in the task envelope
+      - Files / symbols named in the ticket, PR description, or ClarificationEscalation answers
+      - Paths listed in the current PhaseHandoffPacket / WaveHandoffNote / WCP
+
+  S2. Grep/glob hits from the mandatory first sweep (§H.7 step 1)
+      - Exact identifiers, error strings, API names extracted from the goal text
+      - Top matches only (cap ~8); prefer source over tests unless QA phase
+
+  S3. Already-touched files this run
+      - Files modified in prior waves of this task
+      - Files in SDLCState.context_ledger with type=interface_contract | discovered_fact
+
+  S4. Localisation / impact hints (when available)
+      - Implementation Manager localisation candidates (§H.7 step 4)
+      - get_impact_set() of S1∪S3 (1-hop dependents) for QA / Dependency Impact Agent
+
+  S5. Fallback if S1–S4 empty
+      - Shard entrypoints from L0 architecture summary (package roots, main modules)
+      - Document as low-confidence; widen map K slightly
 ```
+
+**Seed weighting (personalization vector `v`):** each seed `s` gets mass `w(s)`, then `v` is L1-normalized over all graph nodes (non-seeds = 0).
+
+| Source | Relative weight | Rationale |
+|---|---|---|
+| S1 explicit paths | 1.0 | Highest trust — human/goal named them |
+| S3 already-touched | 0.8 | Proven relevant this run |
+| S4 impact / localisation | 0.6 | Structural relevance |
+| S2 grep hits | 0.5 | High precision but can be noisy |
+| S5 architecture fallback | 0.2 | Orientation only |
+
+### H.2.3 Personalized PageRank → ranked files
+
+```text
+G      = directed dependency graph for shard(s) covering SeedCollection
+v      = personalization vector from §H.2.2 (nonzero only on seeds)
+α      = damping = 0.85          # standard; teleport weight = 1−α toward v
+score  = PPR(G, v, α)            # Neo4j GDS or networkx.pagerank(personalization=v)
+
+ranked = sort files by score desc
+       exclude: generated/, vendor/, pure lockfiles (configurable denylist)
+       prefer: production sources; demote tests unless agent_phase ∈ {qa, advanced_qa}
+
+top_K  = pack until token budget B_map exhausted (§H.2.5), else K_default = 30
+```
+
+**Why this matches the goal:** teleport restarts always jump back to the seed set, so probability mass concentrates on files that are *structurally close to the goal’s anchors*, not merely globally central. A widely-imported `utils.py` far from the seed neighborhood loses to a mid-degree module on the path between two seeds.
+
+**Implementation entrypoint** (`packages/repo_intel/summaries/repo_map.py`):
+
+```python
+async def get_aider_repo_map(
+    self,
+    scope: list[str],                    # seed paths and/or shard ids
+    *,
+    goal_text: str | None = None,        # used only if caller wants RI to run seed extraction
+    seeds: SeedCollection | None = None, # preferred: Context Builder passes explicit seeds
+    budget_tokens: int = 2500,
+    agent_phase: str = "implementation",
+) -> RepoMap:  # { files: [{path, score, symbols:[{name, signature}]}], token_estimate, seed_ids }
+```
+
+Phase 03 keeps a stub (raw in-degree). Phase 12 replaces the body with real PPR; callers already use this signature.
+
+### H.2.4 Render map (what the model actually sees)
+
+For each file in `top_K`, attach **skeletal symbols only** (Tree-sitter signatures + one-line docstring), never bodies:
+
+```text
+# Repo map (personalized PageRank | seeds: auth/service.py, api/routes/user.py)
+auth/service.py                          score=0.142
+  class AuthService
+  def authenticate(user_id: str, token: str) -> Session
+  def revoke_session(session_id: str) -> None
+api/routes/user.py                       score=0.091
+  def delete_user(user_id: str) -> None
+db/models/user.py                        score=0.067
+  class User(Base)
+...
+```
+
+Agents treat this as an **orientation index**, then expand with `get_symbol_body` / `get_callers` / `search_codebase` (§H.4). Bodies are never in the map.
+
+### H.2.5 Exact fit in the platform flow
+
+**Where it sits in prompt assembly (§M.2 / §H.6):**
+
+```text
+T0  System prompt + tools + L0 architecture summary     (stable KV-cache prefix)
+    └── L0.5 Repo map (this section)                    (task-scoped; rebuild when seeds change)
+T1  Context ledger (pinned)
+T2  Working window (task spec, recent tools, …)
+…   Phase Handoff Packet pointer / excerpts as designed
+```
+
+Injection order inside the agent message remains:
+
+1. Architecture summary (L0)
+2. **Aider repo map for task scope (L0.5)** ← Context Builder calls `get_aider_repo_map`
+3. Phase Handoff Packet
+4. Task-specific retrieved context (RRF / grep windows / progressive tools)
+
+**When it runs (per phase):**
+
+| Phase / agent | Seed bias | Map role |
+|---|---|---|
+| Design Manager / Repo Architecture Analyst | S1 ticket paths + S2 concept grep + L0 packages | Orient design on real modules before ADR/pattern retrieval |
+| Implementation Manager (pre-dispatch localisation) | S1 + S2 + prior-wave files | Produce candidate edit surface; feeds Worker WCPs |
+| CodeGen / Worker agents | WCP `target_files` + interface_contract ledger entries | Every worker starts knowing the neighborhood of *its* edit set |
+| Dependency Impact / QA | Changed files in diff + `get_impact_set` | Rank regression blast radius for test selection |
+| Security / Advanced QA | Same as QA + SAST entry hits | Prefer high-PPR files in the change neighborhood |
+
+**Orchestration sequence (implementation / coding path):**
+
+```text
+1. Task arrives → extract goal text + explicit paths into TaskEnvelope
+2. Context Builder:
+     a. Grep/glob sweep on goal identifiers          → S2
+     b. Merge S1–S4 into SeedCollection
+     c. RI.get_aider_repo_map(seeds=…, budget=B_map) → L0.5 string
+     d. Assemble prompt: L0 → L0.5 → handoff → task spec
+3. Implementation Manager localisation (§H.7.4) may add seeds → rebuild map once
+4. Wave Scheduler / workers:
+     - Each worker gets a map personalized to its WCP target_files (not the global task map)
+5. Mid-task: if worker discovers a new hub file (ledger discovered_fact), optionally
+   refresh L0.5 once per wave — not every tool call
+6. Downstream: RRF fusion (§H.7.3) may re-rank retrieval candidates using
+   PPR scores as one fused list (map injection and RRF scoring share the same score cache)
+```
+
+**Budget packing:**
+
+- Default `B_map`: design = 5000 (see `PHASE_BUDGETS`), implementation workers = 1500–2500, QA = 2000.
+- Pack highest-score files first; stop when adding the next file’s signatures would exceed `B_map`.
+- If a single file’s symbol list is huge, keep only the top symbols by in-file reference count (or export surface).
+
+**Non-goals / hard rules:**
+
+- Do not substitute the map for localisation — it orients; grep + skeleton localisation still pick edit sites.
+- Do not dump PPR scores into the ledger unless a file becomes an interface contract.
+- Do not recompute full-shard PPR every tool call — cache scores keyed by `(shard_graph_version, frozenset(seeds), α)` until incremental index bumps the graph version.
+
+### H.2.6 Success signal
+
+- Map alone (no file bodies) lets Design/Implementation agents name the correct modules in first-pass plans ≥ baseline with global/in-degree map.
+- Token cost of L0.5 stays within budget band; Phase 12 gate: average tokens/task ↓ ≥ 40% vs Phase 11 with no success-rate drop (map is one contributor alongside §H.1/§H.3/handoff packets).
 
 
 
@@ -1979,6 +3112,76 @@ CONTEXT_EXPANSION_TOOLS = [
 ```
 
 Agents receive only Level 0 (architecture summary) + Level 0.5 (repo map for scope) initially. All deeper context is agent-requested.
+
+---
+
+## H.5 Context Ledger — lossless, pinned critical facts
+
+**Why it exists.** Production compaction studies (Factory.ai, 36 k-message production dataset) score artifact tracking 2.19–2.45 / 5.0 *across every published method*. The study's diagnosis: "a file path may be 'low entropy' from an information-theoretic perspective, but it is exactly what the agent needs to continue working." Rather than hoping a smarter summariser one day solves this, we extract critical facts into an append-only, typed, provenance-bearing ledger that lives *outside* the compressible tier entirely.
+
+`ContextLedgerEntry` schema is defined in §B.2. The ledger is stored in `SDLCState.context_ledger` (an `append_only` `DeltaChannel`) and is rendered verbatim into every agent prompt in the pinned T1 slot (§H.6). It is never fed into a compaction call.
+
+**What belongs in the ledger (mandatory):**
+- Decisions — what was chosen and a brief rationale
+- Constraints — hard "must / must-not" requirements for this task
+- Interface contracts — exact symbols, signatures, or protocols that workers must honour
+- Discovered facts — net-new information from RI, RI failures, or escalations
+- Unresolved issues — open `ClarificationEscalation` IDs with a short question
+- Validation outcomes — failures that have already occurred, so workers do not repeat dead approaches
+- WCP-extracted interface changes (§D.9.2) — authoritative record of what was changed, by whom
+
+**What does NOT belong** (stays in the compressible T2/T3 tiers):
+- Full tool results (Blackboard pointer suffices)
+- Raw diff content
+- Routine log lines
+
+**Eviction policy.** When `SDLCState.context_ledger` grows past its configured cap (default 200 entries), entries with `status="superseded"` or `status="resolved"` are evicted first, with their Blackboard pointers retained in a compact eviction log. `status="active"` entries are never evicted automatically.
+
+## H.6 Compaction tiers and triggers
+
+**Five-tier prompt layout.**
+
+| Tier | What lives here | Compressible? | Trigger |
+|---|---|---|---|
+| **T0 — Stable prefix** | System prompt, tool definitions, architecture summary (L0), invariant conventions | Never | Never modified — KV-cache anchor |
+| **T1 — Pinned ledger** | `SDLCState.context_ledger` entries; current `WaveHandoffNote` only (not full note history) | Never | Never — rendered verbatim after T0. On wave advance, replace the pinned note with the new `for_wave` note; prior notes remain in append-only state / Blackboard refs, not in the prompt. |
+| **T2 — Working window** | Recent tool results (last N), current sub-task spec, task envelope | Tier-2 clearing | Wave boundary or token pressure ≥ 40 % of usable budget |
+| **T3 — Compacted history** | Anchored structured summary of evicted T2 spans | Lossy (but restorable) | Wave boundary or token pressure ≥ 70 % of usable budget |
+| **T4 — Blackboard** | Diffs, logs, raw traces, evicted spans, `PhaseHandoffPacket`, evidence bundles | Never | Referenced by pointer only; never inlined |
+
+**Compaction rules (derived from production evidence):**
+
+1. **Wave-boundary first.** The preferred trigger for T3 compaction is the completion of a wave, not a token threshold. A wave close is the first moment a coherent, completed unit exists — the summariser sees a finished thought rather than a mid-task state. This is implemented as an explicit `compact_at_wave_close` flag in the Wave Scheduler node (§D.4.0), not as a reactive token check.
+
+2. **Multi-signal threshold for intra-wave compaction.** If compaction must fire mid-wave (long single-wave runs), require *both* a token signal *and* a recency signal: e.g. token pressure ≥ 70 % of usable AND at least one completed tool-use group (search → read → analyse) has accumulated. Prevents compacting before the worker has enough context to be useful.
+
+3. **Tier-2 clearing precedes tier-3.** Before any LLM compaction call runs, the T2 clearing pass removes tool results older than the last-N window. This is deterministic, free, and preserves the KV-cache prefix because it only removes from the tail.
+
+4. **Never compact into an empty T1.** If the ledger is empty when T3 fires, extract the minimum critical facts (interface changes, constraints) from the T3 span before summarising it.
+
+5. **Anchored-iterative merge, never regenerate.** The T3 summary is a persistent structured document with explicit sections (session intent, modified files, decisions, next steps, open issues). When T3 fires again, *only the newly evicted span is summarised and merged into the existing summary* — the existing sections persist by reference. This prevents compounding loss across multiple compaction cycles.
+
+6. **Every eviction produces a Blackboard pointer.** No information is discarded without a restorable reference. The Blackboard pointer and a one-line digest are appended to the T3 summary, enabling any agent to re-expand the original content via a tool call.
+
+7. **JSON serialisation for KV-cache stability.** WCPs, ledger entries, and any structured data rendered into prompts must use canonical, sorted-key, stable-field-order JSON. A single non-deterministic field (e.g. a timestamp in the stable prefix) can invalidate the entire prefix cache and convert a 10× cache discount into full-price input tokens.
+
+**Tokens-per-task, not tokens-per-request.** The correct efficiency metric is total tokens consumed across all LLM calls to successfully complete a task, not the size of any individual call. A well-sized context that eliminates one re-fetching loop is cheaper than a stripped-down context that forces three extra tool calls.
+
+## H.7 Retrieval strategy for large repositories (100k+ files)
+
+**Hybrid, grep-first, personalized PageRank for budgeted packing.**
+
+For a 100k-file repository, no single retrieval mechanism is universally best. The recommended hybrid:
+
+1. **Grep/glob as the primary cursor** — always fresh, zero staleness, high precision on exact identifiers, error strings, and symbol names. Use windowed reads (cap at ~50–100 lines) rather than full-file reads.
+
+2. **Personalized PageRank repo map for each task** (§H.2) — full seed → PPR → L0.5 injection flow is specified in §H.2.2–H.2.5. Summary: bias the teleport vector on the task's seed files (explicit paths, grep hits, prior-wave edits, localisation/impact hints), rank the shard subgraph, inject top-K file+signature skeletons after L0. A global repo map of 100k files at 1k tokens is close to useless; a personalized map seeded on ~5–12 highly-relevant files is exactly what PageRank is designed for. Best budgeted context yield — most gold content per token — of any retrieval method studied.
+
+3. **Embedding / semantic retrieval via RRF fusion** — add on top of (2) for vocabulary-mismatch cases (e.g. "delete user" → `deactivate_account`). Reciprocal-rank fusion of PageRank map + pgvector results consistently outperforms either alone.
+
+4. **Agentless-style hierarchical localisation in worker context (not a second Send path).** Before CodeGen runs, assemble edit locations via grep/glob → candidate files → skeleton view (signatures, no bodies) → fine-grained locations. Workers receive skeletons of candidates plus full bodies only for precise locations. This is **context assembly**, not scheduling: mechanical `Send` remains Wave Scheduler–only (§D.9.5). This follows the empirically-validated finding that full-file injection *hurt* localisation accuracy compared to skeleton injection.
+
+5. **Never load the full dependency graph into context.** RI queries are point lookups (`get_callers`, `get_dependents`) against the shared long-lived RI service. Topology information for the task is summarised in the L0 architecture JSON and in the SDG's edge list (§B.2), not by dumping the whole NetworkX graph.
 
 ---
 
@@ -2374,8 +3577,15 @@ Hierarchy: SYSTEM → PHASE → MANAGER → AGENT → TOOL/ACTION → COMMUNICAT
 | PHASE | Unnecessary work (extra loops) | Deterministic counts | **Phase 2** |
 | MANAGER | Decomposition covers `ownership_map` files | Deterministic vs RI | **Phase 2** |
 | MANAGER | Circular deps rejected | Deterministic | **MVP** (assert on logs from Phase 06 §04 tests) |
-| MANAGER | Replan cap honored (≤1 per group) | Deterministic | **MVP** |
-| MANAGER | Fan-in never silent-merge | Deterministic (event) | **MVP** |
+| MANAGER | Replan cap honored (≤1 per wave per attempt) | Deterministic | **MVP** |
+| MANAGER | Happy-path Implementation LLM count = 1 Manager + N CodeGen + 1 Integration Validator | Deterministic (`llm_call` spans; no model_id on selector/scheduler/fan-in) | **MVP** |
+| MANAGER | `merge_eligible` never true for ignore-keyed attempts | Deterministic | **MVP** |
+| MANAGER | TopologyDecisionRecord present; policy_rules_fired logged | Deterministic | **MVP** (Phase 06) |
+| MANAGER | topology_class derivation matches §D.10.3 | Deterministic unit test | **MVP** |
+| MANAGER | Demotion rewrites active plan (no live `[A,B]+[B]`) | Deterministic | **MVP** |
+| MANAGER | Amendment count ≤ cap; amendments only add edges | Deterministic | **MVP** |
+| MANAGER | Unnecessary parallelism (parallel + demotion>0) | Deterministic | **Phase 2** |
+| MANAGER | Unnecessary serialization (sequential + zero conflicts + RI available) | Deterministic | **Phase 2** |
 | AGENT | Scope adherence (`touches_files` ⊆ ownership) | Deterministic | **Phase 2** |
 | AGENT | Attribution accuracy | Heuristic (§L.1) | **MVP** |
 | AGENT | Output schema (MASC Check 1) | Deterministic | **MVP** |
@@ -2435,7 +3645,7 @@ You do NOT [out-of-scope actions].
 
 [CONTEXT INJECTION ORDER]
 1. Architecture summary (always injected)
-2. Aider repo map for task scope (injected by context builder)
+2. Aider repo map for task scope (L0.5) — Context Builder: goal/input → SeedCollection → Personalized PageRank → top-K file+signature map (§H.2); workers seed from WCP target_files
 3. Phase Handoff Packet from previous phase
 4. Task-specific retrieved context (tool-expanded as needed)
 
@@ -2559,7 +3769,7 @@ The reflection output is appended to the draft before it enters `Validator`(desi
 | **3. Workflow Overview**       | WorkflowProfile in plain language — risk tier, methodology, active agents, and *which §F.3 rule fired*                                     | Task, WorkflowProfile                          |
 | **4. SDLC Phase View**         | Current position in the state machine (§D.3); backward edges shown as visually distinct loops                                              | `Task.state` + `agent_events` phase transitions (§D.2.1) |
 | **5. Active Agents**           | Which agents are running now and their current tool call                                                                                   | OTel trace stream                              |
-| **6. Live Execution Timeline** | Phase transitions, feedback loops triggered, approvals — chronological                                                                     | agent_events channel                           |
+| **6. Live Execution Timeline** | Phase transitions, feedback loops, approvals, waves, amendments, demotions                                                                 | `agent_events` + `topology_decisions` + Fan-in telemetry |
 | **7. Questions Queue**         | Open questions across a human's in-flight tasks, with already-gathered context shown                                                       | hitl_queue where request_type="clarification"  |
 | **8. Human Approval Requests** | Evidence bundle (diff, QA summary, confidence breakdown, precedent tasks), decision buttons, timeout countdown                             | ApprovalGate evidence_bundle_spec, HITLRequest |
 | **9. Agent Logs**              | Raw OTel trace detail per agent                                                                                                            | Trace backend                                  |

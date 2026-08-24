@@ -53,3 +53,21 @@ Checkpoint coupling — use the documented fallback rather than leaking orchestr
 ## Future Improvements
 
 Phase 2 evaluators in §L.7 (scope adherence, repeated tools). LLM-judge behind the same Protocol — Advanced.
+
+### Topology Evaluation Metrics (Phase 2 — gated on Phase 06 wave data)
+
+Once Phase 06 is deployed and `TopologyDecisionRecord` rows exist, add `packages/evaluation/evaluators/topology.py`:
+
+| `metric_id` | What it measures | Source |
+|---|---|---|
+| `topology.class` | sequential / parallel / hybrid | `TopologyDecisionRecord.topology_class` (§D.10.3 derivation) |
+| `topology.rules_fired` | TP hard/soft ids | `policy_rules_fired` |
+| `topology.wave_count` / `widths` | Planned shape | record fields |
+| `topology.plan_amended` / `amendment_rate` | `plan_amendment_count` | state / events |
+| `topology.wave_demotion_rate` | `wave_demotion` events | TelemetrySink |
+| `topology.unnecessary_serialization` | sequential + zero conflicts + RI available | derived |
+| `topology.unnecessary_parallelism` | parallel/hybrid + demotion>0 | derived |
+| `topology.ri_coverage` | RI-verified vs advisory edges | SDG |
+| `topology.happy_path_llm_budget` | Implementation `llm_call` count == 1+N+1 | TelemetrySink; no model_id on selector/scheduler/fan-in |
+
+Pure Python against the read model — no LangGraph imports.
