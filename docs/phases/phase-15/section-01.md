@@ -6,7 +6,7 @@ Implement `EvaluationPipeline.score(task_id)` as an ARQ job: hydrate a `RunRecor
 
 ## Why It Exists
 
-This is the mechanism that turns the KPI tables in §L.2 from documentation into live numbers, and is the prerequisite for every other section in this phase and for recalibration work flagged as "future" throughout Phases 04–12.
+This is the mechanism that   turns the KPI tables in §L.2 from documentation into live numbers, and is the prerequisite for every other section in this phase and for recalibratizzon work flagged as "future" throughout Phases 04–12.
 
 ## Dependencies
 

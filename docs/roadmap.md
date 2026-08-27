@@ -12,7 +12,7 @@ This is the master index. It converts `final_plan.md` Part C (the blueprint's ow
 | [00](phases/phase-00/README.md) | Foundations                      | 6                 | None               | Safety scaffolding before any agent writes code.                                 |
 | [01](phases/phase-01/README.md) | Orchestration Skeleton           | 4                 | 00                 | A durable, resumable LangGraph graph with a working interrupt/resume round-trip. |
 | [02](phases/phase-02/README.md) | Model Abstraction Layer          | 4                 | 00                 | Model-independence structural from day one.                                      |
-| [03](phases/phase-03/README.md) | Minimal Repository Intelligence  | 6                 | 00, 02             | Working retrieval at small scale before scaling.                                 |
+| [03](phases/phase-03/README.md) | Minimal Repository Intelligence  | 6                 | 00, 02             | Working retrieval over the local working tree (not git HEAD) at small scale.     |
 | [04](phases/phase-04/README.md) | Dynamic Requirements Engine      | 4                 | 03                 | Adaptive clarification loop, not a checklist.                                    |
 | [05](phases/phase-05/README.md) | Planning & Intake Agents         | 6                 | 01, 02, 04         | Wire the Questioning Engine into a real, running intake graph.                   |
 | [06](phases/phase-06/README.md) | Design & Implementation Agents   | 7                 | 05                 | Design-driven code generation with dynamic topology (PARALLEL/SEQUENTIAL/HYBRID) via Topology Selector, Wave Scheduler, and wave-aware Fan-in. |

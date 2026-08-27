@@ -35,6 +35,8 @@ The blueprint's own comparative analysis (§0.1, §G.3) already did the hard eva
 
 **Critical evaluation note:** the blueprint's rejection of SCIP as a "search engine" (§0.2 #5) and of KuzuDB as an embedded-only graph store (§0.2 #4) are both correct calls and are adopted without modification — SCIP is a symbol-export protocol, not a query engine, and KuzuDB's embedded model is a genuine architectural mismatch for a service designed to be queried concurrently across tasks (§G.1).
 
+**MVP source of truth (Phase 03):** indexes are built from the **local working tree** (files on disk under `repo_root`, including uncommitted changes), not from git commits or remotes. Update mechanism: explicit `index` / `reindex` plus a SHA-256 file catalog — not git hooks. See `docs/phases/phase-03/section-05.md`. Git remains available later for diffs, worktrees, and PRs (Phases 06/08); it is not how retrieval freshness is defined at MVP.
+
 ---
 
 ## 3. Model Layer

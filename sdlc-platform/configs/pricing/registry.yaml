@@ -1,0 +1,49 @@
+# APPLICATION-MAINTAINED pricing — not Z.AI invoices, not provider-authoritative.
+#
+# cost_tracking always uses these numbers (final_plan.md §I.5). Update via PR.
+# Bump `version` and `effective_date` on every change.
+#
+# `public_list_*` fields are optional operator notes copied from
+# https://docs.z.ai/guides/overview/pricing on effective_date. They are not
+# used by compute_cost.
+
+version: 2
+effective_date: "2026-08-27"
+provenance:
+  kind: application-maintained
+  provider_authoritative: false
+  review: "PR-reviewed policy file"
+  reference_url: "https://docs.z.ai/guides/overview/pricing"
+  reference_captured: "2026-08-27"
+
+models:
+  glm-4.7-flash:
+    provider: glm
+    model_id: glm-4.7-flash
+    capability_score: 6
+    source: application-maintained
+    # Public list: GLM-4.7-Flash is Free; GLM-4.7-FlashX is $0.07 / $0.40.
+    # Internal rate is non-zero so the kill-switch still sees spend on the cheap tier.
+    input_price_per_1m: 0.07
+    output_price_per_1m: 0.40
+    public_list_input_per_1m: 0.0
+    public_list_output_per_1m: 0.0
+    public_list_note: "Z.AI list: GLM-4.7-Flash Free; FlashX 0.07/0.40. Internal uses FlashX-like rates."
+  glm-4.7:
+    provider: glm
+    model_id: glm-4.7
+    capability_score: 9
+    source: application-maintained
+    input_price_per_1m: 0.60
+    output_price_per_1m: 2.20
+    public_list_input_per_1m: 0.60
+    public_list_output_per_1m: 2.20
+    public_list_note: "Seeded from Z.AI public GLM-4.7 list price; still application-owned."
+  embedding-3:
+    provider: glm
+    model_id: embedding-3
+    capability_score: 1
+    source: application-maintained
+    input_price_per_1m: 0.10
+    output_price_per_1m: 0.0
+    public_list_note: "No embeddings product on Z.AI pricing page as of 2026-08-27. Unused while usage is unavailable."

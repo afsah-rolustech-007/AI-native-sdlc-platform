@@ -10,33 +10,35 @@ Symbol-aware retrieval (Section 01) answers "what is this symbol" but not "where
 
 ## Expected Architecture
 
-`packages/repo_intel/indexers/zoekt_client.py` shells out to (or calls via HTTP, depending on deployment mode) a Zoekt indexer/search process, building an index from the same repo root as Section 01's Tree-sitter pass. Exposed via `search_codebase(query, top_k) -> list[SearchHit]`, feeding into the hybrid retrieval fusion built in Section 06.
+`packages/repo_intel/indexers/zoekt_client.py` shells out to (or calls via HTTP, depending on deployment mode) a Zoekt indexer/search process, building an index from the **same working-tree `repo_root`** as Section 01's Tree-sitter pass (same ignore/catalog rules). Exposed via `search_codebase(query, top_k) -> list[SearchHit]`, feeding into the hybrid retrieval fusion built in Section 06.
+
+Zoekt indexes files on disk. Point it at the working tree. Do not check out a commit first.
 
 ## Dependencies
 
-Phase 00 (sandbox — Zoekt's indexer process should run under the same resource-bounded execution discipline as any other repo-touching subprocess).
+Phase 00 (sandbox — Zoekt's indexer process should run under the same resource-bounded execution discipline as any other repo-touching subprocess). Section 01 catalog walk (share ignore rules so Zoekt and Tree-sitter see the same file set).
 
 ## Atomic Implementation Tasks
 
-1. Stand up Zoekt locally (via its indexer binary `zoekt-index` and search server `zoekt-webserver`, or an equivalent packaged deployment) against the fixture/demo repo.
-2. Implement `ZoektClient.build_index(root_path)` wrapping the indexer invocation.
+1. Stand up Zoekt locally (via its indexer binary `zoekt-index` and search server `zoekt-webserver`, or an equivalent packaged deployment) against the fixture/demo tree.
+2. Implement `ZoektClient.build_index(root_path)` wrapping the indexer invocation over the working tree (respect the same ignore list as the catalog).
 3. Implement `ZoektClient.search(query, top_k) -> list[SearchHit]` wrapping the search query API/CLI, normalizing results to a `SearchHit` model (`file_path, line, snippet, score`).
-4. Decide and document the Zoekt process lifecycle (long-running local service for dev vs. containerized service) — this decision is revisited in Phase 11 when it becomes a properly operated service; document expectations now, don't over-engineer deployment yet.
-5. Integration test: index the fixture repo, run a known-answer search query, assert the expected file/line appears in top results.
+4. Decide and document the Zoekt process lifecycle (long-running local service for dev vs. one-shot index+query) — this decision is revisited in Phase 11 when it becomes a properly operated service; document expectations now, don't over-engineer deployment yet.
+5. Integration test: index the fixture tree, run a known-answer search query, assert the expected file/line appears in top results. Edit the file on disk (no commit), rebuild, confirm the new string is found.
 
 ## Manual Testing Procedure
 
-1. Build the Zoekt index for the fixture repo.
+1. Build the Zoekt index for the fixture tree.
 2. Run 3–5 manual searches for known strings/patterns and confirm expected files rank highly.
-3. Modify a file, rebuild the index, confirm the change is reflected (full rebuild is fine here — incremental Zoekt updates are addressed in Section 05).
+3. Modify a file on disk, rebuild the index, confirm the change is reflected (full Zoekt rebuild is acceptable in this section — scoped rebuild vs full rebuild for Zoekt is decided in Section 05; at MVP scale a full Zoekt rebuild of ≤ a few thousand files is still cheap).
 
 ## Expected Demo
 
-Terminal output of a Zoekt search query against the fixture repo showing ranked results with file/line/snippet — a second, independent retrieval modality proven working alongside Section 01's symbol lookups.
+Terminal output of a Zoekt search query against the fixture tree showing ranked results with file/line/snippet — a second, independent retrieval modality proven working alongside Section 01's symbol lookups.
 
 ## Acceptance Criteria
 
-- [ ] Zoekt index builds successfully against the fixture/demo repo.
+- [ ] Zoekt index builds successfully against the fixture/demo working tree.
 - [ ] Known-answer search queries return the expected file(s) in the top-K results.
 - [ ] `ZoektClient.search` results are normalized into a stable `SearchHit` schema consumable by later hybrid fusion (Section 06).
 
@@ -47,6 +49,7 @@ Terminal output of a Zoekt search query against the fixture repo showing ranked 
 ## Future Improvements
 
 - Federated per-shard Zoekt indexes — Phase 11.
+- True per-file Zoekt incremental updates if a full rebuild ever becomes slow (not expected at Phase 03 scale).
 
 ## Research Opportunities
 

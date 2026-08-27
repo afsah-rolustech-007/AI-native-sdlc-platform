@@ -2,7 +2,7 @@
 
 ## Objective
 
-Assemble Sections 01–05 behind the single `RepositoryIntelligence` interface (§G.6, MVP subset — structural + semantic methods; hybrid RRF fusion and historical/episodic methods are stubbed or deferred per what data exists at this phase), add the AST-generated architecture summary (§G.7), and build the held-out labeled retrieval benchmark that produces this phase's numeric completion criterion.
+Assemble Sections 01–05 behind the single `RepositoryIntelligence` interface (§G.6, MVP subset — structural + semantic methods; hybrid RRF fusion and historical/episodic methods are stubbed or deferred per what data exists at this phase), add the AST-generated architecture summary (§G.7), and build the held-out labeled retrieval benchmark that produces this phase's numeric completion criterion. Retrieval reads the **working-tree-backed** indexes from Sections 01–05; it must fail-closed on stale catalog (`StaleIndexError`) rather than serving last-commit or last-index data as if current.
 
 ## Why It Exists
 
@@ -10,7 +10,7 @@ No agent, from Phase 04 onward, is allowed to touch the graph DB, vector store, 
 
 ## Expected Architecture
 
-`packages/repo_intel/api.py` implements the `RepositoryIntelligence` class exposing (at this phase): `get_callers`, `get_callees`, `get_dependencies`, `get_dependents`, `get_impact_set`, `get_symbol_signature`, `get_symbol_body`, `get_file_structure` (structural, Section 01/03), `search_concepts`, `find_similar_implementations` (semantic, Section 04), `get_architecture_summary` (new, Section 06), and `get_aider_repo_map` as a stub returning a simple heuristic (full PageRank implementation is Phase 12/§H.2 — the method exists in the interface now so agents can be written against its signature, but its Phase 3 implementation can be a simpler placeholder, documented as such). `get_regression_history`, `get_design_decisions`, `get_change_frequency`, and `find_relevant_context` (hybrid RRF) are declared in the interface but raise `NotImplementedError` until Phase 06 (episodic data) and Phase 12 (fusion) respectively — this makes the *full* target interface visible from Phase 3 onward without faking capabilities that don't exist yet.
+`packages/repo_intel/api.py` implements the `RepositoryIntelligence` class exposing (at this phase): `index` / `reindex` / `reindex_paths` / `index_status` (Section 05), `get_callers`, `get_callees`, `get_dependencies`, `get_dependents`, `get_impact_set`, `get_symbol_signature`, `get_symbol_body`, `get_file_structure` (structural, Section 01/03), `search_concepts`, `find_similar_implementations` (semantic, Section 04), `get_architecture_summary` (new, Section 06), and `get_aider_repo_map` as a stub returning a simple heuristic (full PageRank implementation is Phase 12/§H.2 — the method exists in the interface now so agents can be written against its signature, but its Phase 3 implementation can be a simpler placeholder, documented as such). Every read method runs Section 05's freshness check first (unless the caller passed `refresh=True`, which reindexes then reads). `get_regression_history`, `get_design_decisions`, `get_change_frequency`, and `find_relevant_context` (hybrid RRF) are declared in the interface but raise `NotImplementedError` until Phase 06 (episodic data) and Phase 12 (fusion) respectively — this makes the *full* target interface visible from Phase 3 onward without faking capabilities that don't exist yet. Historical methods that would need git history (`get_change_frequency`, etc.) stay unimplemented; Phase 03 does not grow a git-history indexer.
 
 ## Dependencies
 
@@ -33,7 +33,7 @@ Sections 01–05.
 
 ## Expected Demo
 
-This section's demo *is* Phase 03's overall live demo (see Phase 03 README): the benchmark run printing overall precision@5 against the ≥90% target, followed by the incremental re-index timing demo from Section 05, followed by a printed `get_architecture_summary()` output.
+This section's demo *is* Phase 03's overall live demo (see Phase 03 README): the benchmark run printing overall precision@5 against the ≥90% target, followed by the incremental re-index timing demo from Section 05 (**uncommitted** working-tree edit, not a commit), followed by a printed `get_architecture_summary()` output.
 
 ## Acceptance Criteria
 
@@ -41,6 +41,7 @@ This section's demo *is* Phase 03's overall live demo (see Phase 03 README): the
 - [ ] Retrieval precision@5 ≥ 90% on the held-out labeled benchmark set — the blueprint's explicit Phase 3 completion criterion.
 - [ ] `get_architecture_summary()` output is verified accurate by manual review against the demo repo.
 - [ ] Methods not yet implementable at this phase (`find_relevant_context`, historical methods) exist in the interface signature and fail explicitly (`NotImplementedError`), never silently return empty/wrong data.
+- [ ] Read methods raise `StaleIndexError` when the working tree has drifted from the catalog; they do not silently serve a stale index.
 
 ## Risks
 

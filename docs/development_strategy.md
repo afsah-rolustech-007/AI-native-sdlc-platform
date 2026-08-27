@@ -68,7 +68,7 @@ Every atomic task in every section of every phase follows this loop. This is not
 Three test layers exist from Phase 0 onward and grow with the system — never introduced "later":
 
 1. **Unit tests** — pure functions and isolated classes (the Confidence Model formula, `resolve_workflow_profile()` rules, MASC schema checks). Fast, run on every commit.
-2. **Integration tests** — a real Postgres (via `docker-compose` / testcontainers) and a real (small, fixture) repo for Repository Intelligence tests. Slower; run before marking a section complete.
+2. **Integration tests** — a real Postgres (via `docker-compose` / testcontainers) and a real (small, fixture) **working tree** for Repository Intelligence tests (files on disk, including uncommitted edits — not a git HEAD snapshot). Slower; run before marking a section complete.
 3. **Contract tests** (from Phase 2 onward) — every `ModelAdapter` implementation, and later every `Validator`/`ApprovalGate` config, must pass the same shared contract suite. This is what makes "add a second model provider with zero orchestration changes" (Phase 16's acceptance test) actually verifiable rather than aspirational.
 
 From Phase 15 onward, a fourth layer exists: **benchmark/regression tests against the golden dataset** via `EvaluationEngine` (`packages/evaluation/` must not import LangGraph). These are allowed to be slow and are not run on every commit (subset on PR, fuller set on main/nightly), but must run before any prompt, model, or agent-logic change is considered complete.
@@ -97,7 +97,7 @@ Every module boundary in this system exists to make a specific future change che
 Concrete seams to protect (do not let agent code, orchestration code, or API code reach past these interfaces):
 
 - `ModelAdapter` (§I.1) — no provider SDK import outside `model_adapters/`. This is a **grep-verifiable** acceptance criterion in Phase 2 for a reason: run `grep -r "import openai\|import zhipuai" --include="*.py" | grep -v model_adapters/` (or equivalent) as an actual CI check, not just a code-review habit.
-- `RepositoryIntelligence` (§G.6) — no agent imports the graph client, vector client, or Zoekt client directly. Everything goes through the interface.
+- `RepositoryIntelligence` (§G.6) — no agent imports the graph client, vector client, or Zoekt client directly. Everything goes through the interface. Phase 03 indexes the **local working tree** via explicit `index`/`reindex` (content hashes); git is not the retrieval source of truth (`docs/phases/phase-03/section-05.md`).
 - `ApprovalGate` / `Validator` templates (§E.1) — resist creating a bespoke agent class for a new checkpoint or validation rule; add a new *config instance* of the existing template instead. If a genuinely new template shape is needed, that's a real architectural decision — write it down (see §8 below) before building it.
 - Workflow routing logic lives only in `workflow_engine/policy.py` (§F.3) — never let an agent or API handler contain an inline "if risk_tier == critical" branch. If routing logic starts leaking outside this module, that's a sign a rule is missing from the ordered rule table.
 

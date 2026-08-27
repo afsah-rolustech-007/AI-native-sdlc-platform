@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sdlc-platform"
+version = "0.0.1"
+description = "AI-Native SDLC Orchestration Platform"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    "sqlalchemy[asyncio]>=2.0",
+    "alembic>=1.13",
+    "asyncpg>=0.29",
+    "redis>=5.0",
+    "arq>=0.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
+    "structlog>=24.0",
+    "langgraph>=0.3",
+    "langgraph-checkpoint-postgres>=2",
+    "psycopg[binary]>=3.1",
+    "psycopg-pool>=3.2",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.3",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "testcontainers>=4.0",
+    "httpx>=0.27",
+]
+
+[tool.setuptools]
+packages = ["common", "api", "worker", "orchestration", "orchestration.checkpointers", "model_adapters", "model_adapters.glm"]
+
+[tool.setuptools.package-dir]
+common = "packages/common"
+api = "apps/api"
+worker = "apps/worker"
+orchestration = "packages/orchestration"
+model_adapters = "packages/model_adapters"
+
+[tool.pytest.ini_options]
+pythonpath = ["packages", "apps", "."]
+testpaths = ["tests/unit", "tests/integration", "tests/contract"]
+markers = ["live: real GLM HTTP calls (skipped in CI; needs GLM_API_KEY)"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["packages", "apps", "tests"]
+
+[tool.ruff.lint]
+# §B.1 writes Optional[str]; keep that spelling on the Task model.
+per-file-ignores = { "packages/common/task.py" = ["UP045"], "packages/common/tracing.py" = ["BLE001"], "packages/common/sandbox.py" = ["BLE001"], "packages/orchestration/telemetry_adapter.py" = ["BLE001"], "packages/orchestration/hitl.py" = ["BLE001", "S110"], "packages/model_adapters/telemetry.py" = ["BLE001"], "packages/model_adapters/glm/adapter.py" = ["BLE001"], "apps/api/main.py" = ["BLE001"], "scripts/demo_phase0.py" = ["BLE001"], "db/migrations/env.py" = ["E402", "I001"], "db/migrations/versions/*.py" = ["UP007", "UP035"] }
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "packages:apps"
+packages = ["common", "api", "worker", "orchestration", "model_adapters"]
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]

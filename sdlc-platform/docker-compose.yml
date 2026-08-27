@@ -1,0 +1,23 @@
+services:
+  postgres:
+    # Stock postgres:16 cannot CREATE EXTENSION vector (binaries missing).
+    # This image is PostgreSQL 16 with pgvector; init script still enables it.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: sdlc
+      POSTGRES_PASSWORD: sdlc
+      POSTGRES_DB: sdlc
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sdlc -d sdlc"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7.2
+    ports:
+      - "6379:6379"

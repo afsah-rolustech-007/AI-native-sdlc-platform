@@ -10,7 +10,7 @@ This is the payoff for `architecture.md` §4.1's design decision to hide the gra
 
 ## Expected Architecture
 
-`packages/repo_intel/graph/neo4j_client.py` implements the same internal interface Phase 03's `networkx_client.py` exposed (`get_callers`, `get_callees`, `get_dependencies`, `get_dependents`, `get_impact_set` — all backed by Cypher queries instead of in-memory graph traversal), scoped per-shard (Sections 01–02) with cross-shard edges stored in a way queryable from the global index-of-indices. A migration script transforms Phase 03's NetworkX graph construction pipeline's *output* (the extracted edges) into Neo4j `CREATE`/`MERGE` statements, run once per shard during initial federation setup, then maintained incrementally via the same git-diff-triggered pattern from Phase 03 §05.
+`packages/repo_intel/graph/neo4j_client.py` implements the same internal interface Phase 03's `networkx_client.py` exposed (`get_callers`, `get_callees`, `get_dependencies`, `get_dependents`, `get_impact_set` — all backed by Cypher queries instead of in-memory graph traversal), scoped per-shard (Sections 01–02) with cross-shard edges stored in a way queryable from the global index-of-indices. A migration script transforms Phase 03's NetworkX graph construction pipeline's *output* (the extracted edges) into Neo4j `CREATE`/`MERGE` statements, run once per shard during initial federation setup, then maintained incrementally via the same **working-tree content-hash** pattern from Phase 03 §05 (not git-diff).
 
 ## Dependencies
 

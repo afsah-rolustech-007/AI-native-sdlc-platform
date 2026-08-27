@@ -10,7 +10,11 @@ This is what makes impact-aware retrieval possible — Phase 06's Implementation
 
 ## Expected Architecture
 
-`packages/repo_intel/graph/networkx_client.py` builds a `networkx.DiGraph` where nodes are symbols/files (from Section 01's Tree-sitter output) and edges represent import/call relationships, derived from Tree-sitter's reference resolution. `packages/repo_intel/graph/bfs.py` implements bounded-depth BFS traversal for `get_callers`/`get_callees`/`get_impact_set`. The graph is rebuilt (or incrementally updated, Section 05) alongside the symbol index — same trigger, same incremental scope, per §G.2's stated update pattern.
+`packages/repo_intel/graph/networkx_client.py` builds a `networkx.DiGraph` where nodes are symbols/files (from Section 01's Tree-sitter output) and edges represent import/call relationships, derived from Tree-sitter's reference resolution. `packages/repo_intel/graph/bfs.py` implements bounded-depth BFS traversal for `get_callers`/`get_callees`/`get_impact_set`.
+
+The graph is rebuilt or patched on the **same working-tree trigger as the symbol index** (Section 05): when file `B.py` changes, **re-extract edges that originate in `B.py`**. Do **not** automatically re-parse every dependent (`A.py` that imports `B.py`) — `A.py`'s text did not change. Incoming edges toward `B` stay until those other files change. See Section 05 for the exact matrix.
+
+Known MVP limitation (document, do not “fix” with extra re-indexing): if `B` renames a function, `A`'s stored call edge may still name the old symbol until `A.py` is itself reindexed. `get_impact_set(["B.py"])` still finds `A.py` via the **import** edge, which is what Phase 07 needs first.
 
 ## Dependencies
 
@@ -22,24 +26,25 @@ Section 01 (symbols and their reference relationships are the graph's nodes/edge
 2. Build the `networkx.DiGraph` construction pipeline from extracted edges.
 3. Implement `get_callers(symbol_id, depth) -> list[Symbol]` and `get_callees(symbol_id, depth) -> list[Symbol]` as bounded-depth graph traversals.
 4. Implement `get_dependencies(file_path) -> list[str]` and `get_dependents(file_path) -> list[str]` at file granularity.
-5. Implement `get_impact_set(changed_files) -> ImpactSet` — BFS outward from changed files to their dependents, bounded by a configurable depth (§G.6.1; consumed by Phase 07's test-impact analysis).
-6. Unit tests against the fixture repo: known caller/callee relationships resolve correctly; `get_impact_set` for a leaf-module change correctly excludes unrelated modules and includes known dependents.
+5. Implement `get_impact_set(changed_files) -> ImpactSet` — BFS outward from changed files to their dependents, bounded by a configurable depth (§G.6.1; consumed by Phase 07's test-impact analysis). This is a **query**, not an index rebuild.
+6. Unit tests against the fixture tree: known caller/callee relationships resolve correctly; `get_impact_set` for a leaf-module change correctly excludes unrelated modules and includes known dependents.
 
 ## Manual Testing Procedure
 
-1. Build the graph for the fixture repo.
+1. Build the graph for the fixture tree.
 2. Query `get_callers`/`get_callees` for a function with known, hand-verified relationships.
-3. Simulate a change to one file and call `get_impact_set`, manually verifying the returned set against your own understanding of the fixture repo's structure.
+3. Simulate a change to one file (edit on disk + Section 05 reindex of that file) and call `get_impact_set`, manually verifying the returned set against your own understanding of the fixture.
 
 ## Expected Demo
 
-A small visualization (even a printed adjacency list, or a `networkx`-generated graph image for the fixture repo) alongside terminal output of `get_impact_set` for a simulated change, showing the correctly bounded set of affected files.
+A small visualization (even a printed adjacency list, or a `networkx`-generated graph image for the fixture tree) alongside terminal output of `get_impact_set` for a simulated change, showing the correctly bounded set of affected files.
 
 ## Acceptance Criteria
 
-- [ ] Graph correctly represents known import/call relationships in the fixture repo (verified by hand against a small, fully-understood fixture).
+- [ ] Graph correctly represents known import/call relationships in the fixture tree (verified by hand against a small, fully-understood fixture).
 - [ ] `get_callers`/`get_callees` respect the requested depth parameter.
 - [ ] `get_impact_set` produces a correct, bounded set of affected files for a simulated change — this directly de-risks Phase 07's test-impact analysis.
+- [ ] Changing `B.py` does not require re-parsing `A.py` for the import graph to remain usable.
 
 ## Risks
 
@@ -49,6 +54,7 @@ A small visualization (even a printed adjacency list, or a `networkx`-generated 
 
 - Neo4j migration for multi-hop Cypher queries at scale — Phase 11.
 - Cross-shard dependency edges — Phase 11 (§G.4).
+- Optional re-resolution of dependents after a callee rename — **not** Phase 03.
 
 ## Research Opportunities
 

@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdlc-platform
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: sdlc
+          POSTGRES_PASSWORD: sdlc
+          POSTGRES_DB: sdlc
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sdlc -d sdlc"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7.2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+asyncpg://sdlc:sdlc@localhost:5432/sdlc
+      REDIS_URL: redis://localhost:6379/0
+      ENVIRONMENT: ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: uv sync --extra dev --python 3.12
+      - name: OpenTelemetry import guard
+        run: |
+          set -e
+          hits=$(grep -RIn --include='*.py' 'opentelemetry' packages apps || true)
+          bad=$(echo "$hits" | grep -v 'packages/common/tracing.py' || true)
+          if [ -n "$bad" ]; then
+            echo "opentelemetry imports are only allowed in packages/common/tracing.py:"
+            echo "$bad"
+            exit 1
+          fi
+      - name: Provider SDK import guard
+        run: |
+          set -e
+          hits=$(grep -RIn --include='*.py' -E 'import openai|from openai|import zhipuai|from zhipuai|import zai($| )|from zai |langchain_openai' packages apps scripts || true)
+          bad=$(echo "$hits" | grep -v 'packages/model_adapters/glm/' || true)
+          if [ -n "$bad" ]; then
+            echo "provider SDKs may only be imported under packages/model_adapters/glm/:"
+            echo "$bad"
+            exit 1
+          fi
+      - name: Lint
+        run: uv run ruff check packages tests scripts db apps
+      - name: Typecheck
+        run: uv run mypy
+      - name: Unit + contract tests
+        run: uv run pytest tests/unit tests/contract -m "not live"
+      - name: Alembic migrate + drift check
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+
+  chaos:
+    if: >-
+      github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdlc-platform
+    timeout-minutes: 25
+    env:
+      ENVIRONMENT: ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: uv sync --extra dev --python 3.12
+      - name: Crash recovery (20 trials)
+        run: uv run pytest tests/chaos -v

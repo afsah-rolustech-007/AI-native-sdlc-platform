@@ -23,7 +23,7 @@ Both prior blueprints represent serious engineering work. V3 is not a merge — 
 | **Workflow Engine**         | Detailed `WorkflowContext` schema + `@property` derived fields                                  | `WorkflowProfile` + ordered first-match-wins `resolve_workflow_profile()` function                                                                   | **Combined.** V2's richer `WorkflowContext` schema feeds V3; AI-Native's `resolve_workflow_profile()` ordered rule function is the right execution model. V3 uses both                                                                                                              |
 | **MASC / Validation**       | Fully specified 3-check MASC engine (schema → confidence → semantic drift) with token costs     | `Validator` template as a reusable config-parametrized pattern, not bespoke classes                                                                  | **Combined.** MASC from V2 (post-node middleware, cheapest-first) + AI-Native's `Validator` template (parametrized per phase). Eliminates both the naming-without-specifying problem and the bespoke-class explosion problem                                                        |
 | **Agent Design**            | 18+ agents, all individually specified                                                          | Two reusable templates (`ApprovalGate`, `Validator`) + phase-level agent tables                                                                      | **AI-Native wins.** Bespoke agents for patterns that are the same design is unjustified complexity. V3 uses templates for patterns, full specs only for genuinely distinct agents                                                                                                   |
-| **Requirements Engine**     | Detailed question dependency graph, auto-skip via repo context, confidence-gated exit           | Same design, called "Dynamic Questioning Engine," as a dedicated phase and package                                                                   | **Combined.** V2's question dependency graph is more detailed; AI-Native's promotion to a first-class phase and package is the right architectural signal. V3 adopts both                                                                                                           |
+| **Requirements Engine**     | Detailed question de;pendency graph, auto-skip via repo context, confidence-gated exit           | Same design, called "Dynamic Questioning Engine," as a dedicated phase and package                                                                   | **Combined.** V2's question dependency graph is more detailed; AI-Native's promotion to a first-class phase and package is the right architectural signal. V3 adopts both                                                                                                           |
 | **Rollback Design**         | Explicit rollback graph: failure type → reentry point + max depth                               | Two separate concerns: code rollback (git branch) vs. orchestration rollback (checkpoint replay)                                                     | **AI-Native wins** on the conceptual separation. V3 keeps the separation clearly and adds V2's explicit rollback targets                                                                                                                                                            |
 | **Memory Architecture**     | 5 memory scopes; inter-phase artifact contracts with token budgets                              | 4 physical tiers + named scope reconciliation table + Phase Handoff Packets                                                                          | **Combined.** AI-Native's `PhaseHandoffPacket` is the right mechanism. V2's token budget contracts per phase transition are the right constraints. V3 uses both                                                                                                                     |
 | **Repository Intelligence** | SCIP + Tree-sitter + KuzuDB; sharded parallel indexer; `RepositoryIntelligence` API             | Layered index (L0–L4); Tree-sitter + Zoekt + pgvector → Qdrant; NetworkX → Neo4j; federated shards; Aider-style repo map                             | **AI-Native wins on tooling.** Zoekt over SCIP for search (Zoekt is battle-proven at Sourcegraph scale); NetworkX→Neo4j migration path is cleaner than KuzuDB (less mature, embedded-only); Aider repo map is a proven token-efficiency technique. V3 adopts AI-Native's tool stack |
@@ -37,8 +37,6 @@ Both prior blueprints represent serious engineering work. V3 is not a merge — 
 | **Project Structure**       | V2 directory tree                                                                               | AI-Native directory tree with `requirements_engine/`, `chaos/` tests, `configs/` for versioned policies                                              | **AI-Native wins.** Cleaner separation; `chaos/` test suite and versioned policy configs are the right production engineering decisions                                                                                                                                             |
 | **UI**                      | 10 screens with WebSocket event protocol; data contracts per screen                             | 11 screens, thin read layer, clarity over visualization                                                                                              | **Combined.** AI-Native's 11 screens + V2's WebSocket protocol and data contracts. V3 keeps both                                                                                                                                                                                    |
 | **Security**                | RBAC matrix; prompt injection defense; sandboxing                                               | Sandboxing; least-privilege for MCP/tool credentials specifically; prompt injection classifier                                                       | **AI-Native adds** explicit MCP/tool credential scoping. V3 combines: RBAC from V2 + tool credential scoping from AI-Native                                                                                                                                                         |
-
-
 
 
 ## 0.2 Net New Decisions in V3 (Neither Document Had These)
@@ -886,7 +884,7 @@ Ordered by real dependencies. Cannot build a workflow engine before agents exist
 | **0 — Foundations**                    | Safety scaffolding before any agent writes code              | Task model (Pydantic); cost kill-switch; execution sandbox; `TelemetrySink` + OTel adapter; message queue scaffolding; secrets/config management        | None             | Dummy task flows through intake → sandbox → trace log → budget-tracked completion with full audit trail                       |
 | **1 — Orchestration Skeleton**         | Working LangGraph graph with durable state and one interrupt | Parent `StateGraph`; PostgreSQL checkpointer; interrupt/resume round-trip                                                                               | Phase 0          | Task paused for approval, process killed, resumes correctly from checkpoint. 100% across 20 crash trials                      |
 | **2 — Model Abstraction Layer**        | Model-independence structural from day one                   | `ModelAdapter` interface; GLM adapter; cost tracking callback; pricing registry                                                                         | Phase 0          | Zero provider-specific SDK calls outside `model_adapters/` (grep-verifiable)                                                  |
-| **3 — Minimal Repo Intelligence**      | Working retrieval at small scale before scaling              | Tree-sitter symbol index; Zoekt trigram search; git-diff incremental indexing; pgvector store                                                           | Phases 0, 2      | Retrieval precision@5 ≥ 90% on held-out labeled set; incremental update < 10s for 20-file commit                              |
+| **3 — Minimal Repo Intelligence**      | Working retrieval at small scale before scaling              | Tree-sitter symbol index; Zoekt trigram search; working-tree content-hash incremental indexing; pgvector store                                          | Phases 0, 2      | Retrieval precision@5 ≥ 90% on held-out labeled set; incremental update < 10s for a 20-file working-tree change               |
 | **4 — Dynamic Requirements Engine**    | Adaptive clarification loop, not a checklist                 | Question bank + predicates; auto-answer-from-repo check; question dependency DAG; confidence-gated exit                                                 | Phase 3          | Asks clarifying questions on ≥ 95% of ambiguous inputs; skips on ≥ 95% of well-specified inputs                               |
 | **5 — Planning & Intake Agents**       | Wire Questioning Engine into real intake                     | Planning Manager; intake classifier; Confidence Scorer; `Validator`(phase=requirements)                                                                 | Phase 4          | Confidence score computed and logged on every intake; classification accuracy validated                                       |
 | **6 — Design & Implementation Agents** | Design-driven code generation                                | Design Manager + Repo Architecture Analyst; Code Generation sub-agents; parallel fan-out + conflict detection; `Validator`(phase=design,implementation) | Phase 5          | Generated code passes static analysis on first pass ≥ 80% for Low/Medium risk                                                 |
@@ -2704,10 +2702,10 @@ Repository Intelligence is **not** a per-task LangGraph subgraph. Its lifecycle 
 
 | Layer  | Contents                                        | Update Pattern                                                     |
 | ------ | ----------------------------------------------- | ------------------------------------------------------------------ |
-| **L0** | Raw files + git metadata                        | Real-time via git hooks                                            |
+| **L0** | Raw files on the local working tree             | Explicit `index` / `reindex`; SHA-256 catalog (git hooks deferred) |
 | **L1** | AST/symbol index (Tree-sitter)                  | Incremental, per changed file                                      |
-| **L2** | Dependency/call graph (NetworkX→Neo4j)          | Incremental, changed file + 1–2 hop dependents                     |
-| **L3** | Semantic embeddings (pgvector→Qdrant)           | Incremental, same trigger as L1/L2                                 |
+| **L2** | Dependency/call graph (NetworkX→Neo4j)          | Incremental, changed file only (dependents are query-time)         |
+| **L3** | Semantic embeddings (pgvector→Qdrant)           | Incremental, chunks whose content_hash changed                     |
 | **L4** | Architecture/knowledge graph + cached summaries | Invalidated by content-hash + dependency-hash; refreshed on demand |
 
 
@@ -2745,10 +2743,13 @@ At 1M+ files, a single flat index makes query cost proportional to total repo si
 
 ## G.5 Incremental Indexing & Freshness
 
-- Git-diff-triggered re-indexing scoped to changed files + 1–2 hop dependents.
-- **Nightly full re-index** as drift-safety net.
+**MVP source of truth:** the local working tree under `repo_root` (files on disk, including uncommitted edits), not git HEAD. See `docs/phases/phase-03/section-05.md`.
+
+- Content-hash-triggered re-indexing scoped to files whose SHA-256 changed (create / modify / delete). Do **not** re-index 1–2 hop dependents; `get_impact_set` is a graph **query**.
+- Retrieval fail-closes (`StaleIndexError`) if the catalog lags the working tree. Explicit `reindex` (or `refresh=True`); no silent stale answers.
+- **Nightly full re-index** and **git hooks** are deferred (not required for MVP freshness).
 - L4 summaries invalidated via content-hash + dependency-hash keys (staleness is detectable, not silent).
-- Target incremental update latency: < 10s for a typical commit (1–20 files).
+- Target incremental update latency: < 10s for a typical working-tree change (1–20 files).
 
 
 
@@ -3890,7 +3891,7 @@ sdlc-platform/
 │   │   │   ├── coordinator.py    # Sharded parallel indexer
 │   │   │   ├── treesitter.py
 │   │   │   ├── zoekt_client.py
-│   │   │   └── incremental.py    # Git hook integration
+│   │   │   └── incremental.py    # Working-tree content-hash re-index
 │   │   ├── graph/
 │   │   │   ├── networkx_client.py  # MVP graph
 │   │   │   ├── neo4j_client.py     # Scale graph
@@ -3984,7 +3985,7 @@ sdlc-platform/
 ├── scripts/
 │   ├── init_db.py
 │   ├── index_repo.py
-│   └── post_commit_hook.sh
+│   └── reindex_repo.py           # Working-tree re-index (post_commit_hook.sh deferred)
 │
 ├── docker-compose.yml            # PostgreSQL + Redis + Langfuse (dev)
 ├── docker-compose.prod.yml

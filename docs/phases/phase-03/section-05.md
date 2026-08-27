@@ -1,57 +1,181 @@
-# Section 05 — Git-Diff Incremental Indexing
+# Section 05 — Working-Tree Incremental Indexing
 
 ## Objective
 
-Implement git-hook-triggered incremental re-indexing scoped to changed files and their 1–2 hop dependents (§G.5), replacing the "rebuild everything" approach used for manual testing in Sections 01–04, and hit the blueprint's explicit target: incremental update latency under 10 seconds for a typical 1–20 file commit.
+Keep Repository Intelligence aligned with the **local working tree** (files currently on disk under `repo_root`, including uncommitted edits) without rebuilding every index on every edit. Hit the Phase 03 latency target: incremental update **under 10 seconds for a typical 1–20 file working-tree change** at a few hundred to low-thousands of files.
+
+Git commits, remotes, branches, pull/push, and git hooks are **not** this section's mechanism.
 
 ## Why It Exists
 
-Full re-indexing on every change does not scale past a trivial fixture repo, and — more importantly for solo-engineer velocity — makes the manual test loop from Sections 01–04 painfully slow to iterate on. This section is what makes Repository Intelligence a *live*, trustworthy reflection of the current repo state rather than a one-time snapshot, which every downstream agent implicitly assumes.
+Full re-indexing on every save does not scale past a trivial fixture, and a git-commit-based index would lie about the code the engineer (and later, agents) just wrote. This section is what makes RI a trustworthy reflection of **disk**, which every downstream agent implicitly assumes.
 
 ## Expected Architecture
 
-`packages/repo_intel/indexers/incremental.py` hooks into git (`post-commit` hook, or a polling/watch-based fallback for environments without hook access) to compute the diff since the last indexed commit, determines the changed file set, expands it to 1–2 hop dependents via Section 03's graph (`get_dependents`), and re-runs Sections 01/02/04's indexing pipelines scoped to only that file set. A nightly full re-index (mentioned in §G.5 as a "drift-safety net") is scheduled as a Phase 00-worker job — implemented here since it's the natural conclusion of this section's work, even though it's technically a scheduling concern.
+`packages/repo_intel/indexers/catalog.py` owns discovery, ignore rules, and the `indexed_files` catalog. `packages/repo_intel/indexers/incremental.py` computes a content-hash diff against that catalog and applies **scoped** updates to Tree-sitter, Zoekt, NetworkX, and pgvector.
+
+No filesystem watcher. No post-commit hook. No event bus.
+
+### 1. Initial indexing
+
+**Discovery.** `index <repo_root>` (CLI and/or `RepositoryIntelligence.index(repo_root)`). `repo_root` is an explicit absolute path from config/`RI_REPO_ROOT`, not inferred from `git rev-parse`. A git repo is **not** required.
+
+**Walk.** Recurse from `repo_root`. Include source files for languages Tree-sitter supports in this phase (start Python + TypeScript; additive later).
+
+**Exclude** (deny list, documented in code):
+
+- `.git/`
+- `node_modules/`, `.venv/`, `venv/`, `__pycache__/`, `.mypy_cache/`, `.pytest_cache/`
+- `dist/`, `build/`, `*.egg-info/`
+- obvious binaries / non-text (by extension) and files over a size cap (~1 MiB)
+
+If a `.gitignore` exists, apply it as an **ignore-file format** (same patterns the engineer already uses). That is convenience, not “git is the source of truth.” Untracked, un-ignored files **are** indexed.
+
+**First index.** Full walk → parse/index every eligible file into all four stores → write `indexed_files` and a repo-level snapshot.
+
+**Catalog metadata (what “version” we indexed):**
+
+| Field | Role |
+|---|---|
+| `relative_path` | Identity of the file in the tree |
+| `content_hash` | SHA-256 of file bytes — **authority** for “this is what we indexed” |
+| `size_bytes` | Debug / optional prefilter later |
+| `mtime_ns` | Hint only — **not** freshness authority |
+| `last_indexed_at` | When this path was last successfully indexed |
+| `parse_status` | ok / skipped / parse_error |
+
+Repo snapshot: `repo_root`, `snapshot_id`, `indexed_at`, `file_count`, `catalog_hash` (hash of sorted `(path, content_hash)` pairs). **Not** a git commit SHA.
+
+### 2. Change detection — chosen mechanism
+
+| Option | Verdict for MVP |
+|---|---|
+| Filesystem mtimes | Rejected as authority (copy, some editors, containers, `touch`) |
+| Content hashes (SHA-256 of bytes) | **Chosen** |
+| Filesystem watcher | Deferred — extra process, missed events, no strong need |
+| Explicit `reindex` command | **Chosen as the trigger** (hashes decide *what* changed) |
+| Git diff | Rejected as source of the changed-file set (misses uncommitted work) |
+
+**On `reindex`:** walk eligible files, SHA-256 every file, compare to the catalog. At hundreds–thousands of files this is cheap compared to Tree-sitter/embed. Do **not** trust mtime to skip hashing in v1 (simpler, reliable). mtime short-circuit is a later optimization if hashing ever shows up in profiles.
+
+### 3. Incremental re-index (do not rebuild every index for every change)
+
+Walk vs catalog produces: **created**, **modified** (hash differs), **deleted** (in catalog, missing on disk). **Rename** = delete old path + create new path (same-hash rename detection is **DEFERRED**).
+
+Then update **only the affected paths**. Do **not** expand to 1–2 hop dependents for re-indexing (that expansion is a **query** via `get_impact_set`, not an index job).
+
+| Event | Tree-sitter | Zoekt | NetworkX | pgvector |
+|---|---|---|---|---|
+| **File created** | Parse; insert symbols | Add file (or include in scoped/full Zoekt rebuild — see below) | Add nodes/edges extracted from **this** file | Embed new symbol chunks |
+| **File modified** | Delete this path's symbols; re-parse; insert | Update this file | Drop this file's **outgoing** edges; re-extract from this file. Incoming edges from *other* files stay until those files change | Re-embed chunks whose **chunk** `content_hash` changed; delete chunks for removed symbols |
+| **File deleted** | Delete symbols for path | Remove file | Remove this file's nodes and incident edges | Delete embeddings for path |
+| **File renamed** | Treat as delete + create | Same | Same | Same (rewrite `file_path` only if we later add same-hash rename; not required now) |
+| **Symbols in the file change** | Yes (it's a modify) | Yes if text changed | Yes for this file's edges | Yes for changed chunks only |
+| **Imports/deps in the file change** | Yes (AST includes imports) | Yes if text changed | **Yes — this is the graph update for that file** | Only if chunk text hash changed (usually yes, because the file text changed) |
+| **“Semantic embedding of this file should change”** | n/a | n/a | n/a | Only if chunk `content_hash` changed |
+
+**Zoekt MVP compromise:** if per-file Zoekt updates are awkward, a **full Zoekt rebuild of the working tree** after a small hash-diff is allowed. At this scale that is still cheap. Tree-sitter, NetworkX, and pgvector **must not** full-rebuild just because Zoekt did. Document the choice in code comments.
+
+### 4. Scheduling (when indexing runs)
+
+Prefer explicit triggers over a permanent background watcher.
+
+| Trigger | Who | Behavior |
+|---|---|---|
+| `index` | Human / setup script | First full index (or after catalog wipe) |
+| `reindex` | Human / script after local edits | Hash walk + scoped incremental |
+| `reindex_paths(paths)` | Future agents after they write files (API exists now; Phase 05+ must call it) | Incremental on those paths (still hash-verify) |
+| Before retrieval | RI API | **Does not** auto-embed on every query. If stale → `StaleIndexError` (see §5). Optional `refresh=True` runs `reindex` then the query |
+| Git hook / inotify / nightly full job | — | **DEFERRED** |
+
+Lifecycle: `unindexed` → `index` → `fresh` → (disk edits) → `stale` (per-file in catalog vs tree; API treats **any** stale eligible file as blocking) → `reindex` → `fresh`.
+
+### 5. Staleness
+
+**Compared:** catalog `(relative_path, content_hash)` vs current eligible working tree (same walk/ignore rules).
+
+**Detected as stale:**
+
+- hash mismatch (modified)
+- path in tree not in catalog (created)
+- path in catalog not in tree (deleted)
+
+**Granularity:** detection is **per-file**. The repo is not one boolean, but retrieval still **blocks if any eligible file is stale** — mixed fresh/stale is unsafe to serve as “current code.”
+
+**On retrieval while stale:** fail-closed. Raise `StaleIndexError` listing stale paths. Do **not** return results as if current. Do **not** return empty as if “no hits.” Caller runs `reindex` / `reindex_paths` or `refresh=True`.
+
+Cheap check: same hash walk as `reindex` (at MVP scale this is fine). Do not use commit SHA or “max mtime of the repo.”
+
+### 6. Dependency propagation (`A.py` imports `B.py`; `B.py` changes)
+
+**Update immediately:** `B.py` on all four stores (row in the table above).
+
+**Leave unchanged:** `A.py` symbols, `A.py` Zoekt posting, `A.py` embeddings, `A.py`'s outgoing edges. `A.py`'s text did not change. The import edge `A → B` remains valid until `A.py` is reindexed (and it does not need to be).
+
+**Graph query-time:** `get_impact_set(["B.py"])` still finds `A.py` via existing edges. That is a **read**, not a reason to re-embed `A`.
+
+**Do not** regenerate `A.py` embeddings because `B` changed. Cross-file embedding invalidation is **DEFERRED** (Phase 11+ if a real eval shows it's needed).
+
+**Known limitation (document, don't “fix” in Phase 03):** if `B` renames a function, `A`'s stored *call* edge may still name the old symbol until `A.py` is reindexed. Import-level impact is enough for Phase 07's first use.
+
+### 7. Performance
+
+Target: a few hundred to low-thousands of files.
+
+- Hash walk all eligible files (cheap).
+- Parse / graph-extract / embed **only** paths whose file hash changed (plus deletes).
+- Skip pgvector writes when chunk `content_hash` is unchanged even inside a modified file (e.g. untouched functions).
+- Do not BFS-expand the re-index set.
+- Keep the &lt;10s target, measured on a **1–20 file working-tree change**, not a commit.
 
 ## Dependencies
 
-Sections 01–04 (all three indexes must support scoped/partial re-run, not just full-repo rebuild), Section 03 (dependent-expansion needs the graph).
+Sections 01–04 (each indexer must support **scoped** update for a path list: replace/delete/insert — not only `index_everything()`). Section 03's graph is **not** used to expand the re-index set.
 
 ## Atomic Implementation Tasks
 
-1. Implement `get_changed_files(since_commit) -> list[str]` via `git diff --name-only`.
-2. Implement dependent-expansion: `changed_files ∪ get_dependents(f, depth=2) for f in changed_files`.
-3. Implement scoped re-run for Tree-sitter (re-parse only the expanded file set, update/replace their `Symbol` rows), Zoekt (incremental index update if supported natively, else scoped rebuild), and pgvector (re-embed only chunks whose `content_hash` changed — this is where Section 04's `content_hash` field pays off).
-4. Implement the git post-commit hook script (`scripts/post_commit_hook.sh` per §Q) invoking the incremental indexer.
-5. Implement the nightly full re-index as an ARQ scheduled job (Phase 00's worker).
-6. Implement staleness detection for L4-equivalent cached data (architecture summary, once it exists in Section 06) via content-hash + dependency-hash keys per §G.5 — wire the mechanism now even if the summary itself is built in Section 06.
-7. Benchmark test: make a controlled 1–20 file change to the fixture (or a larger sample) repo, time the incremental re-index, assert < 10s.
+1. Implement `catalog.py`: walk, ignore rules, SHA-256, `indexed_files` + snapshot read/write, `diff_working_tree() -> {created, modified, deleted}`.
+2. Implement `incremental.py`: apply the per-event matrix above; log/count files actually re-processed (for the “untouched files were not re-parsed” check).
+3. Implement `StaleIndexError` and `index_status()` / `assert_fresh()` used by Section 06's API.
+4. Implement CLI: `index`, `reindex`, optional `reindex_paths`. **No** `post_commit_hook.sh` in this phase.
+5. Benchmark: edit 1–20 files on disk (no commit), time `reindex`, assert &lt; 10s; assert unrelated files were not re-embedded/re-parsed.
 
 ## Manual Testing Procedure
 
-1. Make a small, realistic commit to the demo repo (e.g., rename a function used in 3 other files).
-2. Run the incremental indexer and time it.
-3. Query `get_symbol_signature` for the renamed function and confirm it reflects the new name; query a dependent file's symbols to confirm no stale references remain in the index for the changed relationship.
-4. Manually verify unrelated, untouched files were *not* re-processed (e.g., via a log/counter of files touched by this run).
+1. `index` the fixture **directory** (git optional).
+2. Edit a file on disk without committing. Call a retrieval method → expect `StaleIndexError`.
+3. `reindex`, time it, query the edited symbol/string — index matches disk.
+4. Confirm logs/counters: only the changed path(s) were re-parsed/re-embedded.
+5. Delete a file, `reindex`, confirm it disappears from symbols/search.
 
 ## Expected Demo
 
-Terminal output: a timed run of the incremental indexer after a small commit, printing "N files re-indexed in X.XXs" with X < 10, followed by a query proving the index reflects the change.
+Timed `reindex` after a small **uncommitted** edit: “N files re-indexed in X.XXs” with X &lt; 10, then a query that proves the index matches the working tree (not HEAD).
 
 ## Acceptance Criteria
 
-- [ ] Incremental indexing correctly scopes to changed files + 1–2 hop dependents, not the full repo.
-- [ ] Measured latency is under 10 seconds for a 1–20 file commit on the benchmark repo — this is the blueprint's explicit Phase 3 completion criterion and must be measured, not assumed.
-- [ ] Nightly full re-index job is scheduled and runs successfully at least once in testing (can be manually triggered for the demo rather than waiting for a real nightly schedule).
-- [ ] Content-hash-based staleness detection correctly identifies unchanged chunks and skips re-embedding them.
+- [ ] Change detection is content-hash vs working tree — no git diff, no hook required.
+- [ ] Incremental path updates Tree-sitter + graph + pgvector for changed files only; unrelated files are not re-processed.
+- [ ] Measured latency &lt; 10s for a 1–20 file working-tree change.
+- [ ] Retrieval while stale raises `StaleIndexError` (fail-closed), never silent stale answers.
+- [ ] `A.py` is not re-embedded solely because `B.py` (imported by A) changed.
+- [ ] Uncommitted new/modified files are indexed after `reindex`.
 
 ## Risks
 
-- **Risk:** Git hook installation is per-clone and easy to forget/misconfigure, silently leaving the index stale. **Mitigation:** the nightly full re-index exists specifically as this safety net (per §G.5) — document clearly that hooks are an optimization, not the sole freshness mechanism.
+- **Risk:** Humans (and later agents) forget to `reindex`. **Mitigation:** fail-closed `StaleIndexError` on retrieval, not a background watcher and not a git hook. Phase 05+ must call `reindex_paths` after writes.
+- **Risk:** Zoekt full rebuild hides a “we re-indexed the world” smell. **Mitigation:** still hash-diff first; Tree-sitter/pgvector remain scoped; document Zoekt rebuild as an MVP compromise.
 
-## Future Improvements
+## Future Improvements (DEFERRED)
 
-- Sharded, parallel incremental indexing across domain shards — Phase 11.
+- Filesystem watcher / always-on daemon
+- Git post-commit hooks, git-diff as an *accelerator* (never as SoT)
+- Nightly full re-index job
+- Same-hash rename detection
+- Re-index 1–2 hop dependents / re-embed importers
+- Remote repos, branches, multi-developer sync
+- Distributed index, event bus
 
 ## Research Opportunities
 
-Measure how re-index latency scales as fixture repo size grows, to build an early empirical model of what "1M files" will require in Phase 11 — cheap to start collecting this data now.
+Log re-index latency vs number of changed files vs tree size now, so Phase 11 has an empirical curve — not a git-commit curve.
