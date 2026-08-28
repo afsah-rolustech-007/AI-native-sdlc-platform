@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     pricing_registry_path: str = "configs/pricing/registry.yaml"
     circuit_breaker_failure_threshold: int = 5
     circuit_breaker_recovery_timeout_s: float = 30.0
+    # Phase 03: local working-tree root. Empty means callers must pass repo_root explicitly.
+    # Never inferred from git.
+    ri_repo_root: str = ""
+    # Optional Zoekt shard directory. Empty = per-repo cache under ~/.cache/sdlc-platform/zoekt/.
+    ri_zoekt_index_dir: str = ""
 
 
 @lru_cache

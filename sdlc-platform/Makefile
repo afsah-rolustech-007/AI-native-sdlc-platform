@@ -1,9 +1,15 @@
-.PHONY: up migrate test lint typecheck dev checkpointer chaos
+.PHONY: up migrate test lint typecheck dev checkpointer chaos zoekt-install zoekt-pull zoekt-webserver zoekt-webserver-stop
 
 # uv + Python 3.12 are required (see docs/techstack.md).
 UV ?= uv
 COMPOSE ?= docker compose
 export PYTHONPATH := packages:apps
+
+# Optional human UI for Zoekt shards. Search itself is one-shot CLI (`zoekt -jsonl`),
+# not this process. Phase 11 can operate a long-running Zoekt service.
+ZOEKT_INDEX_DIR ?= $(HOME)/.cache/sdlc-platform/zoekt
+ZOEKT_LISTEN ?= :6070
+ZOEKT_IMAGE ?= ghcr.io/sourcegraph/zoekt
 
 up:
 	$(COMPOSE) up -d postgres redis
@@ -31,3 +37,19 @@ typecheck:
 dev:
 	$(UV) run uvicorn api.main:app --host 0.0.0.0 --port 8000 & \
 	$(UV) run arq worker.main.WorkerSettings
+
+zoekt-install:
+	@command -v go >/dev/null 2>&1 || { echo "install Go from https://go.dev/dl/ then re-run make zoekt-install"; exit 1; }
+	go install github.com/sourcegraph/zoekt/cmd/zoekt-index@latest
+	go install github.com/sourcegraph/zoekt/cmd/zoekt@latest
+	go install github.com/sourcegraph/zoekt/cmd/zoekt-webserver@latest
+
+zoekt-pull:
+	docker pull $(ZOEKT_IMAGE)
+
+# Optional. Does not replace ZoektClient.search. Ctrl-C to stop.
+zoekt-webserver:
+	zoekt-webserver -index $(ZOEKT_INDEX_DIR) -listen $(ZOEKT_LISTEN)
+
+zoekt-webserver-stop:
+	-pkill -f 'zoekt-webserver -index'

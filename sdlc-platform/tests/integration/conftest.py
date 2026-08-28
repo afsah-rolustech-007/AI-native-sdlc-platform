@@ -56,6 +56,11 @@ async def db_session(migrated_database_url: str) -> AsyncIterator[AsyncSession]:
     async with factory() as session:
         yield session
         await session.rollback()
-        await session.execute(text("TRUNCATE TABLE cost_tracking, hitl_log, approvals, tasks CASCADE"))
+        await session.execute(
+            text(
+                "TRUNCATE TABLE symbols, indexed_files, repo_index_snapshots, "
+                "cost_tracking, hitl_log, approvals, tasks CASCADE"
+            )
+        )
         await session.commit()
     await engine.dispose()

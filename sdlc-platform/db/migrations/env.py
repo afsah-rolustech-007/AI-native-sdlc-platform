@@ -17,6 +17,9 @@ from common.config import get_settings
 from common.db import ensure_asyncpg_url
 from common.models import Base
 
+# Registers RI tables on Base.metadata so `alembic check` sees them.
+import repo_intel.tables  # noqa: F401
+
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
