@@ -23,6 +23,8 @@ CAPABILITY_REQUIREMENTS: dict[tuple[str, str], int] = {
     ("qa", "static_analysis"): 1,
     ("any", "summarization"): 3,
     ("any", "intent_classification"): 4,
+    # Planning Manager (Phase 05 §03). Score 4 → Fast tier (flash is 6).
+    ("intake", "classification"): 4,
     ("masc", "semantic_drift"): 4,
 }
 

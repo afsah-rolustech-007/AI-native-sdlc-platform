@@ -56,3 +56,82 @@ This section's demo *is* Phase 03's overall live demo (see Phase 03 README): the
 ## Research Opportunities
 
 This benchmark is the first real evaluation artifact in the entire roadmap — consider whether its query taxonomy (by type) generalizes into the Golden Dataset structure Phase 15 will need; reusing the same labeling discipline here saves rework later.
+
+---
+
+## Implementation (as built)
+
+### The four signals stay separate
+
+`packages/repo_intel/api.py` exposes symbol, lexical, semantic, and graph retrieval as
+four independent methods. There is **no cross-store fusion** at this phase:
+
+| Signal | Method(s) | Backing store |
+|---|---|---|
+| symbol | `get_symbol_signature`, `get_symbol_body`, `get_file_structure` | Postgres (Section 01) |
+| lexical | `search_codebase` | Zoekt (Section 02) |
+| semantic | `search_concepts`, `find_similar_implementations` | pgvector (Section 04) |
+| graph | `get_callers`, `get_callees`, `get_dependencies`, `get_dependents`, `get_impact_set` | NetworkX (Section 03) |
+
+Keeping them separate is what makes the benchmark diagnostic: a miss is attributable to
+one retrieval signal rather than to a ranking formula. Overlap dedup and `kinds`/`paths`/
+`min_score` filtering stay inside pgvector where the spans are known. RRF fusion
+(`find_relevant_context`) raises `NotImplementedError` until Phase 12.
+
+### Freshness gate
+
+Every read calls Section 05's whole-tree `assert_fresh()` first and raises `StaleIndexError`
+on drift. `refresh=True` reindexes and then reads. Graph reads additionally hydrate the
+RAM-only NetworkX graph if this process has not built it yet.
+
+### Deferred methods fail loudly
+
+`find_relevant_context` (Phase 12), `get_regression_history`, `get_design_decisions`, and
+`get_change_frequency` (Phase 06+ episodic data) exist with real signatures and raise
+`NotImplementedError` naming the phase. They never return empty as if that were an answer.
+
+### Boundary enforcement
+
+`tests/contract/test_repo_intel_boundary.py` parses the AST of everything under `apps/`,
+`packages/orchestration/`, `packages/common/`, and `scripts/` and fails if anything imports
+`repo_intel.symbol_store`, `repo_intel.indexers.*`, `repo_intel.graph`, or `repo_intel.vector`
+directly. Indexing entry points and the section demos are on an explicit allowlist.
+
+### `get_architecture_summary` and `get_aider_repo_map`
+
+`packages/repo_intel/summary.py` derives the §G.7 JSON purely from symbols + import edges —
+deterministic and diffable, never LLM-generated. "Service" is the first path segment, which
+is a crude but honest proxy for ownership. `get_aider_repo_map` ranks files by raw import
+in-degree; Phase 12 replaces it with Aider-style PageRank.
+
+### Benchmark: success@5, not precision@5
+
+`tests/benchmark/` holds a **frozen corpus** (`corpus/`, 14 files across 5 services, including
+deliberate semantic near-misses) and **frozen labels** (`queries.json`, 29 queries). Both are
+frozen so a label can never be edited to make a run pass.
+
+The metric is **success@5**: a query is a hit when at least one gold answer is in the top 5.
+Classic precision@5 is the wrong instrument here — most queries have exactly one correct
+answer, so precision@5 is capped at 0.20 and would measure nothing. Success@5 answers the
+question that actually matters for an agent: did the right code reach the context window?
+
+Reported per signal and per query type. Run with `make benchmark`, or as part of the suite
+via `tests/integration/test_retrieval_benchmark.py`.
+
+**Baseline (deterministic hashing embedder, Zoekt not installed):**
+
+| Scope | success@5 |
+|---|---|
+| overall | 96.2% (25/26 scored) |
+| semantic | 100% (19/19) |
+| graph | 86% (6/7) |
+| lexical | not scored — Zoekt binaries unavailable on the measuring machine |
+
+The single miss (`g06`) is a labeled-adversarial query: callers reach `DatabasePool.acquire`
+through `self.pool`, and Section 03 resolves direct-name calls only. It is a documented
+recall limit of attribute-call resolution, kept in the set rather than deleted.
+
+Building this benchmark found one real defect: header-only class chunks were suppressing
+their own methods during overlap dedup, because a class row spans the whole class while its
+vector is signature + docstring only. Exempting class rows from suppression moved semantic
+success@5 from 94% to 100%.

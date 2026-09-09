@@ -1,0 +1,48 @@
+# §E.4 core + always-on slots. Policy — not interview scripts.
+questions:
+  - id: Q1
+    category: business_objective
+    mandatory: true
+    text: What is the primary objective of this change?
+    render: "Primary objective (required). Evidence so far: {evidence}"
+    applies_if:
+      always: true
+    depends_on: []
+    impact: 0.9
+    risk: 0.4
+    information_value: 0.95
+
+  - id: Q2
+    category: functional
+    mandatory: true
+    text: Who is the user or consumer of this change?
+    applies_if:
+      always: true
+    depends_on:
+      - Q1
+
+  - id: Q3
+    category: functional
+    mandatory: true
+    text: What are the acceptance criteria?
+    applies_if:
+      always: true
+    depends_on:
+      - Q1
+
+  # Repo-situation slot. Auto-answerable from the snapshot; not a user preference.
+  - id: Qstack1
+    category: functional
+    mandatory: false
+    text: Which programming languages does the repository currently use?
+    applies_if:
+      always: true
+    depends_on:
+      - Q1
+    evidence_plan:
+      need: repo_languages
+      methods:
+        - signal: snapshot
+          extractor: languages_from_snapshot
+      accept_as: fact
+      on_insufficient: unknown

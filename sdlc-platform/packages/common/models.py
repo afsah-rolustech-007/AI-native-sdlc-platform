@@ -1,7 +1,8 @@
 """SQLAlchemy tables for Phase 00. Column names follow `final_plan.md` §R.
 
-Only four tables are created now: `tasks`, `cost_tracking`, plus unused scaffolds
-`approvals` and `hitl_log`. Later §R tables wait for their phases.
+Only four tables are created now: `tasks`, `cost_tracking`, `approvals`, and
+`hitl_log`. ApprovalGate (Phase 05 §02) writes the latter two. Later §R tables
+wait for their phases.
 """
 
 from datetime import datetime
@@ -59,7 +60,7 @@ class TaskRow(Base):
 
 
 class ApprovalRow(Base):
-    """Scaffold only — nothing writes here until Phase 08."""
+    """Written by ApprovalGate (Phase 05 §02) on a human decision."""
 
     __tablename__ = "approvals"
 
@@ -78,7 +79,7 @@ class ApprovalRow(Base):
 
 
 class HitlLogRow(Base):
-    """Scaffold only — nothing writes here until Phase 08. `request_type` is required by §R."""
+    """Durable HITL inbox (§D.7.1). ApprovalGate writes rows; UI reads pending here."""
 
     __tablename__ = "hitl_log"
     __table_args__ = (

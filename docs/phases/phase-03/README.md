@@ -70,6 +70,12 @@ Staleness is **per-file**, not all-or-nothing. Retrieval is **blocked** (`StaleI
 
 Point the indexer at a small fixture tree (or this repo). Run a batch of ~20 hand-labeled queries through `RepositoryIntelligence`, compute precision@5 against the ≥90% target. Then **edit a file on disk without committing**, run `reindex`, show it finishes in under 10 seconds for a 1–20 file change, and re-run a query proving the index reflects the uncommitted edit.
 
+> **As built:** `make benchmark` and `make ri-demo`. The metric is **success@5**, not
+> precision@5 — most labeled queries have exactly one correct answer, which caps
+> precision@5 at 0.20 and makes it measure label cardinality instead of retrieval quality.
+> See [`tests/benchmark/README.md`](../../../sdlc-platform/tests/benchmark/README.md) for
+> the rationale and the recorded baseline (96.2% overall).
+
 ## Deliverables
 
 - `packages/repo_intel/indexers/treesitter.py` — symbol index.

@@ -1,0 +1,58 @@
+# Fail-closed: activate while any auth/PII/payments flag is True or unknown.
+questions:
+  - id: Qsec1
+    category: security_compliance
+    mandatory: true
+    text: What compliance requirements apply (auth, payments, PII)?
+    evidence_plan:
+      need: existing_auth_module
+      methods:
+        - signal: snapshot
+          query: auth
+          extractor: service_exists
+        - signal: symbol
+          symbol_id: auth/service.py::AuthService
+          extractor: symbol_exists
+          budget: 1
+        - signal: lexical
+          query: AuthService
+          extractor: identifier_in_snippet
+          budget: 1
+      accept_as: fact
+      on_insufficient: unknown
+      max_ri_calls: 4
+    applies_if:
+      any_true_or_unknown:
+        - touches_auth
+        - touches_pii
+        - touches_payments
+    depends_on:
+      - Q1
+    impact: 0.95
+    risk: 0.95
+    information_value: 0.85
+
+  - id: Qsec2
+    category: security_compliance
+    mandatory: true
+    text: How should data in this change be classified?
+    applies_if:
+      any_true_or_unknown:
+        - touches_auth
+        - touches_pii
+        - touches_payments
+    depends_on:
+      - Qsec1
+
+  - id: Qsec3
+    category: security_compliance
+    mandatory: true
+    text: Which regulatory constraints apply (GDPR, PCI, or none)?
+    applies_if:
+      any_true_or_unknown:
+        - touches_auth
+        - touches_pii
+        - touches_payments
+    depends_on:
+      - Qsec2
+    render: "Regulatory scope. Do not copy repository auth facts as the decision. {evidence}"

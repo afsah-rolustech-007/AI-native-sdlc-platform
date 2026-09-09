@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from tree_sitter import Node, Parser
+from tree_sitter import Node, Parser, Tree
 
 from repo_intel.exceptions import FileParseError, RepoIntelError, UnsupportedLanguageError
 from repo_intel.indexers.catalog import (
@@ -50,7 +50,7 @@ _LANGUAGES = {
 }
 
 # File-structure queries omit imports; agents want class/function lists (§G.6).
-_STRUCTURE_KINDS = frozenset({"module", "class", "function", "method"})
+STRUCTURE_KINDS = frozenset({"module", "class", "function", "method"})
 
 
 def looks_binary(content: bytes) -> bool:
@@ -68,8 +68,10 @@ def first_error_detail(node: Node) -> str:
     return "syntax error"
 
 
-def parse_source(relative_path: str, content: bytes, language: str) -> list[Symbol]:
-    """Parse already-read file bytes. Raises FileParseError on ERROR trees."""
+def parse_source_and_tree(
+    relative_path: str, content: bytes, language: str
+) -> tuple[list[Symbol], Tree]:
+    """One Tree-sitter parse. Graph edge extraction reuses this tree (no second parser)."""
     grammar = _LANGUAGES.get(language)
     if grammar is None:
         raise UnsupportedLanguageError(relative_path)
@@ -79,10 +81,16 @@ def parse_source(relative_path: str, content: bytes, language: str) -> list[Symb
     if tree.root_node.has_error:
         raise FileParseError(relative_path, first_error_detail(tree.root_node))
     if language == "python":
-        return extract_python_symbols(relative_path, content, tree)
+        return extract_python_symbols(relative_path, content, tree), tree
     if language in {"typescript", "tsx"}:
-        return extract_typescript_symbols(relative_path, content, tree, grammar=language)
+        return extract_typescript_symbols(relative_path, content, tree, grammar=language), tree
     raise UnsupportedLanguageError(relative_path)
+
+
+def parse_source(relative_path: str, content: bytes, language: str) -> list[Symbol]:
+    """Parse already-read file bytes. Raises FileParseError on ERROR trees."""
+    symbols, _tree = parse_source_and_tree(relative_path, content, language)
+    return symbols
 
 
 def parse_file(path: Path | str, *, relative_path: str | None = None) -> list[Symbol]:
@@ -99,7 +107,9 @@ def parse_file(path: Path | str, *, relative_path: str | None = None) -> list[Sy
     return parse_source(rel, content, language)
 
 
-def _extension_stats(per_extension: dict[str, ExtensionParseStats], extension: str) -> ExtensionParseStats:
+def _extension_stats(
+    per_extension: dict[str, ExtensionParseStats], extension: str
+) -> ExtensionParseStats:
     stats = per_extension.get(extension)
     if stats is None:
         stats = ExtensionParseStats(extension=extension)
@@ -165,9 +175,7 @@ async def index_repo(repo_root: Path | str, session: AsyncSession) -> IndexStats
         symbols_indexed += len(symbols)
 
     catalog_hash = compute_catalog_hash(catalog_pairs)
-    await upsert_snapshot(
-        session, root, file_count=len(snapshots), catalog_hash=catalog_hash
-    )
+    await upsert_snapshot(session, root, file_count=len(snapshots), catalog_hash=catalog_hash)
     await session.commit()
     return IndexStats(
         repo_root=str(root),
@@ -205,12 +213,10 @@ async def get_file_structure(
     relative = normalize_query_path(root, file_path)
     await assert_file_fresh(session, root, relative)
     rows = await get_file_symbol_rows(session, root, relative)
-    return [symbol_from_row(row) for row in rows if row.kind in _STRUCTURE_KINDS]
+    return [symbol_from_row(row) for row in rows if row.kind in STRUCTURE_KINDS]
 
 
-async def get_symbol_signature(
-    session: AsyncSession, repo_root: Path | str, symbol_id: str
-) -> str:
+async def get_symbol_signature(session: AsyncSession, repo_root: Path | str, symbol_id: str) -> str:
     root = resolve_repo_root(repo_root)
     symbol = await require_symbol(session, root, symbol_id)
     await assert_file_fresh(session, root, symbol.file_path)
@@ -224,9 +230,7 @@ async def get_symbol_body(session: AsyncSession, repo_root: Path | str, symbol_i
     await assert_file_fresh(session, root, symbol.file_path)
     disk_path = root / symbol.file_path
     text = disk_path.read_text(encoding="utf-8")
-    return slice_source_lines(
-        text, symbol.start_line, symbol.end_line, file_path=symbol.file_path
-    )
+    return slice_source_lines(text, symbol.start_line, symbol.end_line, file_path=symbol.file_path)
 
 
 async def get_indexed_parse_status(

@@ -1,0 +1,36 @@
+questions:
+  - id: Qint1
+    category: api_contracts
+    mandatory: true
+    text: Which services require an atomic update?
+    applies_if:
+      all:
+        - field: repo_architecture
+          eq: microservices
+        - affected_modules_gt: 1
+    depends_on:
+      - Q1
+
+  - id: Qint2
+    category: api_contracts
+    mandatory: true
+    text: What API versioning requirements apply?
+    applies_if:
+      all:
+        - field: repo_architecture
+          eq: microservices
+        - affected_modules_gt: 1
+    depends_on:
+      - Qint1
+
+  - id: Qint3
+    category: api_contracts
+    mandatory: false
+    text: Are there external consumers of the changed APIs?
+    applies_if:
+      all:
+        - field: repo_architecture
+          eq: microservices
+        - affected_modules_gt: 1
+    depends_on:
+      - Qint2

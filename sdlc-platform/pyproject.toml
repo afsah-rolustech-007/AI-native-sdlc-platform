@@ -31,6 +31,7 @@ dependencies = [
     "tree-sitter-python>=0.25.0",
     "tree-sitter-typescript>=0.23.2",
     "pathspec>=1.1.1",
+    "networkx>=3.3",
 ]
 
 [project.optional-dependencies]
@@ -54,6 +55,14 @@ packages = [
     "model_adapters.glm",
     "repo_intel",
     "repo_intel.indexers",
+    "repo_intel.graph",
+    "repo_intel.vector",
+    "requirements_engine",
+    "agents",
+    "agents.templates",
+    "agents.intake",
+    "agents.prompts",
+    "agents.prompts.schemas",
 ]
 
 [tool.setuptools.package-dir]
@@ -63,6 +72,8 @@ worker = "apps/worker"
 orchestration = "packages/orchestration"
 model_adapters = "packages/model_adapters"
 repo_intel = "packages/repo_intel"
+requirements_engine = "packages/requirements_engine"
+agents = "packages/agents"
 
 [tool.pytest.ini_options]
 pythonpath = ["packages", "apps", "."]
@@ -70,6 +81,7 @@ testpaths = ["tests/unit", "tests/integration", "tests/contract"]
 markers = [
     "live: real GLM HTTP calls (skipped in CI; needs GLM_API_KEY)",
     "zoekt: live Zoekt binaries or ghcr.io/sourcegraph/zoekt image",
+    "benchmark: Section 06 retrieval benchmark (run explicitly: make benchmark)",
 ]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
@@ -78,15 +90,15 @@ asyncio_default_fixture_loop_scope = "function"
 target-version = "py312"
 line-length = 100
 src = ["packages", "apps", "tests"]
-extend-exclude = ["tests/fixtures"]
+extend-exclude = ["tests/fixtures", "tests/benchmark/corpus"]
 
 [tool.ruff.lint]
 # §B.1 writes Optional[str]; keep that spelling on the Task model.
-per-file-ignores = { "packages/common/task.py" = ["UP045"], "packages/common/tracing.py" = ["BLE001"], "packages/common/sandbox.py" = ["BLE001"], "packages/orchestration/telemetry_adapter.py" = ["BLE001"], "packages/orchestration/hitl.py" = ["BLE001", "S110"], "packages/model_adapters/telemetry.py" = ["BLE001"], "packages/model_adapters/glm/adapter.py" = ["BLE001"], "apps/api/main.py" = ["BLE001"], "scripts/demo_phase0.py" = ["BLE001"], "db/migrations/env.py" = ["E402", "I001"], "db/migrations/versions/*.py" = ["UP007", "UP035"], "packages/repo_intel/indexers/treesitter.py" = ["BLE001"] }
+per-file-ignores = { "packages/common/task.py" = ["UP045"], "packages/common/tracing.py" = ["BLE001"], "packages/common/sandbox.py" = ["BLE001"], "packages/orchestration/telemetry_adapter.py" = ["BLE001"], "packages/orchestration/hitl.py" = ["BLE001", "S110"], "packages/orchestration/masc.py" = ["BLE001"], "packages/agents/base.py" = ["BLE001"], "packages/agents/intake/node.py" = ["BLE001"], "packages/model_adapters/telemetry.py" = ["BLE001"], "packages/model_adapters/glm/adapter.py" = ["BLE001"], "apps/api/main.py" = ["BLE001"], "apps/worker/hitl_jobs.py" = ["BLE001", "S110"], "scripts/demo_phase0.py" = ["BLE001"], "scripts/demo_semantic_search.py" = ["E402"], "scripts/demo_requirements_group_b.py" = ["E402"], "scripts/demo_requirements_engine.py" = ["E402"],  "db/migrations/env.py" = ["E402", "I001"], "db/migrations/versions/*.py" = ["UP007", "UP035"], "packages/repo_intel/indexers/treesitter.py" = ["BLE001"], "packages/repo_intel/vector/pgvector_client.py" = ["BLE001"], "packages/requirements_engine/extract.py" = ["BLE001"] }
 
 [tool.mypy]
 python_version = "3.12"
 mypy_path = "packages:apps"
-packages = ["common", "api", "worker", "orchestration", "model_adapters", "repo_intel"]
+packages = ["common", "api", "worker", "orchestration", "model_adapters", "repo_intel", "requirements_engine", "agents"]
 ignore_missing_imports = true
 plugins = ["pydantic.mypy"]

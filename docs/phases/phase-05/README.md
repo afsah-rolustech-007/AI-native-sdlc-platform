@@ -21,8 +21,8 @@ Real intake_node (replaces Phase 01's stub)
 Planning Manager (classifies Task: work_type, risk_tier — real LLM call)
    │
    ▼
-Requirements Analyst (drives Phase 04's QuestioningEngine inside the graph,
-   │                   using real interrupt() calls for human-facing questions)
+Requirements Analyst (drives Phase 04's evidence-first engine inside the graph,
+   │                   interrupt() only for ranked human questions; auto-answers do not pause)
    │
    ▼
 Confidence Scorer (calls packages/common/confidence.py with real signals)

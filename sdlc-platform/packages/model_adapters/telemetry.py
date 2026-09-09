@@ -209,6 +209,7 @@ class InstrumentedAdapter:
                 task_id=request.task_id or self._default_task_id,
                 phase=request.phase or self._default_phase,
                 agent_id=request.agent_id or self._default_agent_id,
+                parent_span_id=request.parent_span_id,
                 attributes={
                     "model_id": model_id or pricing.model_id,
                     "provider": pricing.provider,

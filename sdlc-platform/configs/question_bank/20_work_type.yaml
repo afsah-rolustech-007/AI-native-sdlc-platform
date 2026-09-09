@@ -1,0 +1,83 @@
+questions:
+  - id: Q4
+    category: performance
+    mandatory: false
+    text: What performance targets apply?
+    applies_if:
+      work_type_in:
+        - feature
+        - new_project
+    depends_on:
+      - Q3
+
+  - id: Q5
+    category: scalability
+    mandatory: false
+    text: What scalability expectations apply?
+    applies_if:
+      work_type_in:
+        - feature
+        - new_project
+    depends_on:
+      - Q3
+
+  - id: Q6
+    category: reliability
+    mandatory: false
+    text: What availability requirements apply (SLA, RTO, RPO)?
+    applies_if:
+      work_type_in:
+        - feature
+        - new_project
+    depends_on:
+      - Q3
+
+  - id: Q4b
+    category: functional
+    mandatory: true
+    text: What are the reproduction steps?
+    applies_if:
+      work_type_in:
+        - bug
+    depends_on:
+      - Q3
+
+  - id: Q5b
+    category: functional
+    mandatory: true
+    text: What is the expected vs actual behavior?
+    applies_if:
+      work_type_in:
+        - bug
+    depends_on:
+      - Q4b
+
+  - id: Q6b
+    category: functional
+    mandatory: true
+    text: When did the defect start?
+    applies_if:
+      work_type_in:
+        - bug
+    depends_on:
+      - Q5b
+
+  - id: Q7h
+    category: reliability
+    mandatory: true
+    text: What is the blast radius of this hotfix?
+    applies_if:
+      work_type_in:
+        - hotfix
+    depends_on:
+      - Q3
+
+  - id: Q8h
+    category: reliability
+    mandatory: false
+    text: Is a temporary workaround available?
+    applies_if:
+      work_type_in:
+        - hotfix
+    depends_on:
+      - Q7h

@@ -25,9 +25,10 @@ def _router() -> ModelRouter:
     )
 
 
-def test_select_code_generation_returns_flash_tier() -> None:
-    chosen = _router().select("implementation", "code_generation", {})
+def test_select_intake_classification_returns_flash_tier() -> None:
+    chosen = _router().select("intake", "classification", {})
     assert chosen.pricing.model_id == "glm-4.7-flash"
+    assert chosen.capability_score >= 4
 
 
 def test_select_architecture_returns_higher_tier() -> None:

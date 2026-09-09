@@ -49,9 +49,7 @@ def parse_jsonl_file_match(payload: dict[str, Any], *, rank: int) -> list[Search
             line_no = int(match.get("LineNumber") or match.get("lineNumber") or 0)
             snippet = decode_zoekt_bytes(match.get("Line") or match.get("line")).rstrip("\n\r")
             score = _as_float(match.get("Score"), fallback=file_score - (index * 0.001))
-            hits.append(
-                SearchHit(file_path=file_path, line=line_no, snippet=snippet, score=score)
-            )
+            hits.append(SearchHit(file_path=file_path, line=line_no, snippet=snippet, score=score))
         return hits
     chunk_matches = payload.get("ChunkMatches") or payload.get("chunkMatches") or []
     if isinstance(chunk_matches, list) and chunk_matches:
@@ -65,9 +63,7 @@ def parse_jsonl_file_match(payload: dict[str, Any], *, rank: int) -> list[Search
             snippet = decode_zoekt_bytes(chunk.get("Content") or chunk.get("content"))
             snippet = snippet.splitlines()[0] if snippet else ""
             score = _as_float(chunk.get("Score"), fallback=file_score - (index * 0.001))
-            hits.append(
-                SearchHit(file_path=file_path, line=line_no, snippet=snippet, score=score)
-            )
+            hits.append(SearchHit(file_path=file_path, line=line_no, snippet=snippet, score=score))
         return hits
     return [SearchHit(file_path=file_path, line=0, snippet="", score=file_score)]
 

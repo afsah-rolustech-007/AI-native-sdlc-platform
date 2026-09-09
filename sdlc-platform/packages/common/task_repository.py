@@ -98,3 +98,23 @@ async def update_task_state(session: AsyncSession, task_id: str, state: TaskStat
     row.state = state.value
     await session.commit()
     return row_to_task(row)
+
+
+async def update_task_classification(
+    session: AsyncSession,
+    task_id: str,
+    work_type: WorkType,
+    risk_tier: RiskTier,
+) -> Task:
+    """Write work_type and risk_tier from Planning Manager onto `tasks`.
+
+    Graph state does not have those fields. Postgres Task is the durable copy.
+    """
+    result = await session.execute(select(TaskRow).where(TaskRow.id == task_id))
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise KeyError(task_id)
+    row.type = work_type.value
+    row.risk_tier = risk_tier.value
+    await session.commit()
+    return row_to_task(row)

@@ -1,0 +1,76 @@
+questions:
+  # Repo-situation: what the tree declares today. Not "which database should we use".
+  - id: Qdb_tech
+    category: data_integrity
+    mandatory: false
+    text: Which database technology does the repository currently declare?
+    applies_if:
+      always: true
+    depends_on:
+      - Q1
+    evidence_plan:
+      need: declared_database
+      methods:
+        - signal: manifest
+          query: postgres
+          extractor: declared_database
+      accept_as: fact
+      on_insufficient: unknown
+
+  - id: Qdb1
+    category: data_integrity
+    mandatory: true
+    text: Is the migration additive, or does it modify/drop existing data?
+    applies_if:
+      field: has_database_changes
+      eq: true
+    depends_on:
+      - Q1
+    evidence_plan:
+      need: existing_database_entities
+      methods:
+        - signal: snapshot
+          query: models
+          extractor: database_entities_present
+      accept_as: fact
+      on_insufficient: unknown
+
+  - id: Qdb2
+    category: data_integrity
+    mandatory: true
+    text: What data volume is affected?
+    applies_if:
+      field: has_database_changes
+      eq: true
+    depends_on:
+      - Qdb1
+
+  - id: Qdb3
+    category: data_integrity
+    mandatory: true
+    text: Is zero-downtime required?
+    applies_if:
+      field: has_database_changes
+      eq: true
+    depends_on:
+      - Qdb2
+
+  - id: Qnfr1
+    category: non_functional
+    mandatory: false
+    text: Which non-functional constraints are in scope besides performance and scale?
+    applies_if:
+      work_type_in:
+        - feature
+        - new_project
+    depends_on:
+      - Q3
+
+  - id: Qdep1
+    category: deployment_constraints
+    mandatory: false
+    text: What deployment constraints apply (environment, freeze windows, rollout)?
+    applies_if:
+      always: true
+    depends_on:
+      - Q1

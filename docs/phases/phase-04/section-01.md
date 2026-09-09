@@ -1,53 +1,81 @@
-# Section 01 — Question Bank & Data Model
+# Section 01 — ClaimSet, Evidence, and Spec Projection
 
 ## Objective
 
-Implement the `Question` dataclass (§E.4) and populate an initial question bank organized by category (business objective, functional, non-functional, security/compliance, performance, scalability, reliability, data integrity, API contracts, deployment constraints), stored as versioned config per §Q's `configs/question_bank/`.
+Define the typed objects the rest of the engine operates on: a `ClaimSet` extracted from the raw request, `Provenance` / `EvidenceRecord` for everything the engine believes, and a projection from those internal types onto §B.2 `RequirementsSpec` (the `TypedDict` already declared in `packages/orchestration/state.py`).
 
 ## Why It Exists
 
-A hardcoded, in-code question list would violate the "policy configs go through PR review, versioned" principle (§N) that this whole system applies to workflow rules and pricing — questions are exactly this kind of tunable policy. Building the bank as config-driven from day one means later tuning (Phase 15's evaluation might reveal certain questions are low-value) is a config change, not a code change.
+Literal §E.4 starts at `Question`. That forces a question-first loop. Evidence-first needs a structured representation of the *request* first, so later steps classify and retrieve against claims rather than re-sending prose to an LLM.
+
+`RequirementsSpec` stays the **handoff** shape for Phase 05/`SDLCState`. It is a list of strings. The engine's working types are richer (status, source, evidence). Do **not** change `SDLCState.RequirementsSpec` in this phase.
 
 ## Expected Architecture
 
-`packages/requirements_engine/models.py` defines `Question` exactly per §E.4 (`id, text, category, applies_if, auto_answerable_from, depends_on`). `applies_if` is a `Callable[[WorkflowContext], bool]` — since `WorkflowContext` itself is formally defined in Phase 10 (§F.2), this section defines a minimal working subset of `WorkflowContext` locally (work_type, risk_tier, touches auth/PII flags, repo_architecture, has_database_changes, etc. — the fields §E.4's dependency DAG actually reads) and Phase 10 later reconciles it into the full schema. The question bank itself lives in `configs/question_bank/*.yaml`, loaded and validated into `Question` objects at startup.
+`packages/requirements_engine/claims.py` and `models.py`.
+
+**Claim kind** (what it is about) is separate from **epistemic status** (how we know it):
+
+| Kind | Maps toward §B.2 |
+|---|---|
+| `objective` | functional / assumptions |
+| `functional` | `functional` |
+| `constraint` | functional or NFR, depending on `nfr_type` |
+| `nfr` | `non_functional[nfr_type]` |
+| `acceptance` | `acceptance_criteria` |
+| `out_of_scope` | `out_of_scope` |
+| `repo_dependent` | stays internal until evidence or a decision resolves it |
+| `unknown` | `open_ambiguities` until answered |
+
+| Status | Meaning |
+|---|---|
+| `DECISION` | Explicit in the request or given by the engineer. Wins over repository facts. |
+| `FACT` | Established by deterministic evidence (snapshot field, manifest, symbol hit, exact lexical identifier). |
+| `INFERENCE` | Derived or weak retrieval (including **all semantic hits**). Never silently promoted to DECISION. |
+| `UNKNOWN` | Not established. May activate a question slot. |
+| `CONTRADICTION` | Two **explicit** requirements conflict (request vs later engineer answer, or two request claims). Repository PostgreSQL + user "use MongoDB" is **not** a contradiction — it is FACT + DECISION and may activate migration slots. |
+
+`Provenance` records `source` (`request` \| `engineer` \| `repository` \| `derived` \| `assumption`), `ref` (path, symbol id, question id), `retrieved_via` (`snapshot` \| `symbol` \| `lexical` \| `graph` \| `semantic` \| `manifest` \| `none`), and `catalog_hash` at the time of retrieval.
+
+**Structured extract** (`extract.py`): exactly one `ModelAdapter` call per session. Input is the raw request (and optional intake fields if the CLI supplies them). **Do not put the architecture summary in this prompt** — that mixes repository guesses into request claims. Prefer `call_tools` with a single `extract_claims` tool (Phase 02 already supports tool calling) over hoping `response_format` is honored. Validate with Pydantic. On parse failure: retry **once**, then fail closed by treating the request as unstructured (all high-value slots UNKNOWN), **never invent requirements**.
 
 ## Dependencies
 
-None beyond Phase 00 (config loading pattern).
+Phase 02 (`ModelAdapter`). `orchestration.state.RequirementsSpec` as the emit target (import the TypedDict; do not fork it).
 
 ## Atomic Implementation Tasks
 
-1. Implement the `Question` dataclass/Pydantic model per §E.4.
-2. Define a minimal `WorkflowContext`-subset type sufficient for `applies_if` predicates at this phase — document explicitly that Phase 10 will supersede/merge this with the full §F.2 schema, and that this is a deliberate, temporary simplification, not a design mistake.
-3. Author the initial question bank in YAML covering every category named in §E.4, seeded directly from the partial dependency DAG shown in §E.4 (Q1–Q8h, Qsec1–3, Qint1–3, Qdb1–3) plus reasonable additions per category not explicitly enumerated in the blueprint (the blueprint's DAG is explicitly "(Partial)").
-4. Implement a loader (`load_question_bank(path) -> list[Question]`) that parses YAML into validated `Question` objects, failing loudly (not silently skipping) on a malformed entry.
-5. Unit tests: every question in the bank parses successfully; `depends_on` references only IDs that exist in the bank (referential integrity check — catches typos before they cause silent DAG bugs in Section 02).
+1. Implement `Claim`, `ClaimSet`, `Provenance`, `EvidenceRecord`, `EpistemicStatus`, `ClaimKind`.
+2. Implement `extract_claims(request, adapter) -> ClaimSet` with schema validation and a single retry.
+3. Implement `project_spec(claim_set, trace) -> RequirementsSpec` filling every §B.2 field (`version` starts at 1; `approved_at`/`approved_by` stay `None` until Phase 05/08).
+4. Unit tests: projection of mixed DECISION/FACT/UNKNOWN; contradiction does not get dropped; extract parse failure does not emit fabricated functional requirements.
+5. Do **not** call Repository Intelligence from this section.
 
 ## Manual Testing Procedure
 
-1. Load the question bank and print the full list grouped by category.
-2. Deliberately introduce a typo in a `depends_on` reference and confirm the loader's validation catches it.
-3. Review the bank's category coverage against §E.4's list by eye — confirm every named category has at least a few questions.
+1. Extract a well-specified request ("Add JWT refresh to the existing FastAPI auth module, keep PostgreSQL") and print the ClaimSet.
+2. Extract a one-liner ("add auth") and confirm mostly `unknown` / `repo_dependent`, not invented NFRs.
+3. Project both to `RequirementsSpec` JSON and confirm `open_ambiguities` is populated for the one-liner.
 
 ## Expected Demo
 
-Terminal output listing the full question bank grouped by category, with a summary count per category — proving the bank exists, is complete, and is validated.
+Terminal JSON of a ClaimSet next to its projected `RequirementsSpec`, with every claim showing kind, status, and provenance.
 
 ## Acceptance Criteria
 
-- [ ] Every category named in §E.4 has at least one question.
-- [ ] `depends_on` referential integrity is validated at load time and covered by a test that catches a broken reference.
-- [ ] The question bank is stored as reviewable config (YAML), not hardcoded Python.
+- [ ] Claim kind and epistemic status are separate fields.
+- [ ] Extract is repo-blind (no RI, no snapshot in the prompt).
+- [ ] Projection emits a valid §B.2 `RequirementsSpec` without mutating `orchestration/state.py`.
+- [ ] Malformed model output does not invent requirements.
 
 ## Risks
 
-- **Risk:** An under-populated question bank produces shallow requirements gathering that later phases (Design, Implementation) inherit as ambiguity. **Mitigation:** treat the bank as a living artifact — Phase 15's evaluation (ambiguity rate KPI, ambiguity rate < 10% target per §L.2) is the long-term feedback signal for whether it needs expansion; don't try to make it exhaustive up front.
+- **Risk:** The extract model infers repository facts from the request wording ("existing backend" → "therefore FastAPI"). **Mitigation:** repo-blind prompt; anything that needs the tree is `repo_dependent` + UNKNOWN until Section 03–05.
 
 ## Future Improvements
 
-- Expand the bank based on real usage patterns once Phase 05+ generates real requirements sessions.
+- Reconcile ClaimSet with Phase 10 `WorkflowContext` and Phase 05 Intent Tracker (`ADDITIVE` / `MODIFICATION` / `CONTRADICTION`).
 
 ## Research Opportunities
 
-Which question categories correlate most strongly with downstream rework (Design rework rate, §L.2) is a genuinely interesting empirical question — but only answerable once Phase 15's evaluation pipeline and enough task volume exist. Note it here as a hypothesis to test later.
+Which extract taxonomies correlate with fewer downstream design gaps — only answerable once Phase 15 has outcome data.

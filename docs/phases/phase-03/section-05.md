@@ -179,3 +179,67 @@ Timed `reindex` after a small **uncommitted** edit: “N files re-indexed in X.X
 ## Research Opportunities
 
 Log re-index latency vs number of changed files vs tree size now, so Phase 11 has an empirical curve — not a git-commit curve.
+
+---
+
+## Implementation (as built)
+
+### Modules
+
+| Module | Role |
+|---|---|
+| `catalog.diff_snapshots(snapshots, catalog, scope=None)` | Pure function: working-tree hashes vs `indexed_files` → `CatalogDiff`. No disk, no DB, unit-tested directly. `scope` limits deletes to a path subset so `reindex_paths` does not report the rest of the tree as deleted. |
+| `catalog.read_paths(paths)` | Targeted read for `reindex_paths` — same eligibility rules, no whole-tree walk. |
+| `symbol_store.list_catalog_hashes` / `replace_file_index` | Diff input, and per-path replace (delete cascades this path's symbols, then reinsert). |
+| `indexers/incremental.IncrementalIndexer` | Orchestrates `index` / `reindex` / `reindex_paths` / `status` / `assert_fresh` / `hydrate_graph`. |
+
+### One parse per changed file
+
+`_parse_once` runs Tree-sitter exactly once per created/modified file and shares the
+result three ways: symbols → Postgres, `(symbols, tree)` → `NetworkXClient.replace_file_parsed`,
+`(symbols, source_text)` → `chunks_from_symbols` → `PgvectorClient.apply_chunks`.
+Unchanged files are never read past their hash. Inside a changed file, chunks whose
+`content_hash` matches the stored row are counted as `chunks_skipped_unchanged` and
+never re-embedded.
+
+A file that fails to parse is recorded with `parse_status="parse_error"`, keeps its
+catalog row (so it is not perpetually stale), contributes no symbols or chunks, and
+has its outgoing graph edges dropped. One bad file never aborts a run.
+
+### Commit order and failure semantics
+
+1. Parse changed files.
+2. Rebuild Zoekt (full rebuild — the documented MVP compromise) **before** the DB commit,
+   so the catalog never claims a lexical index that does not exist.
+3. One transaction: embeddings → symbol/catalog replace → deletes → repo snapshot → commit.
+   Embedding happens before any write, so a provider outage leaves the previous index intact.
+4. Patch the in-memory graph last; it is RAM-only and rebuildable.
+
+Any failure rolls the transaction back and raises `RepoIntelError`. A partial reindex is
+never durable: there is no state where a catalog row exists without its vectors. The tree
+simply stays `stale`, and Section 06 keeps refusing to read.
+
+Missing Zoekt binaries are logged as a warning and do not fail indexing — lexical search
+itself still fails closed with `ZoektNotIndexedError`. A Zoekt rebuild that *fails* does
+abort the run, leaving the previous shards in place.
+
+### Freshness
+
+`status()` walks the tree, diffs, and returns `IndexStatus(state=unindexed|fresh|stale)`
+with the stale paths. `assert_fresh()` raises `StaleIndexError` for both `stale` and
+`unindexed` — a never-indexed tree is not silently "fresh and empty".
+
+`NetworkXClient` lives in process memory, so a restart loses it while Postgres and Zoekt
+stay fresh. `hydrate_graph()` rebuilds it on the first graph query after the freshness
+check passes; it is not part of the stale/fresh contract.
+
+### CLI
+
+`scripts/ri_index.py status|index|reindex [PATH ...] [--repo-root R] [--rebuild] [--live]`.
+`index --rebuild` wipes this repo's rows and starts over; plain `index` is `reindex`.
+
+### Known limitation carried forward
+
+A symbol that is deleted from a file but still *called* by another file survives in the
+graph as a dangling call target, because Section 03 keeps referenced nodes so the calling
+file does not need re-parsing. That is an accurate unresolved reference, not stale data.

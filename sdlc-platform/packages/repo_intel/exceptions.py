@@ -17,8 +17,7 @@ class StaleIndexError(RepoIntelError):
     def __init__(self, stale_paths: list[str], message: str | None = None) -> None:
         self.stale_paths = list(stale_paths)
         detail = message or (
-            "working tree does not match the indexed catalog for: "
-            + ", ".join(self.stale_paths)
+            "working tree does not match the indexed catalog for: " + ", ".join(self.stale_paths)
         )
         super().__init__(detail)
 
@@ -82,3 +81,34 @@ class ZoektIndexError(RepoIntelError):
 
 class ZoektSearchError(RepoIntelError):
     """The Zoekt search process failed. Results must not be treated as complete."""
+
+
+class GraphNotBuiltError(RepoIntelError):
+    """Graph queries ran before NetworkXClient.build. Empty is not a valid answer."""
+
+
+class EmbeddingsNotIndexedError(RepoIntelError):
+    """No embedding rows for this working tree. Empty is not a valid search answer."""
+
+    def __init__(self, repo_root: str) -> None:
+        self.repo_root = repo_root
+        super().__init__(
+            f"no code embeddings for {repo_root}; "
+            "call PgvectorClient.index_working_tree before search"
+        )
+
+
+class EmbeddingIndexError(RepoIntelError):
+    """Embedding or pgvector write failed. Search must not treat this as zero hits."""
+
+
+class EmbeddingDimensionError(EmbeddingIndexError):
+    """Adapter returned a vector whose length does not match the pgvector column."""
+
+    def __init__(self, got: int, expected: int) -> None:
+        self.got = got
+        self.expected = expected
+        super().__init__(
+            f"embedding length is {got}, expected {expected}. "
+            "The code_embeddings column is fixed-width; do not store a mismatched vector."
+        )

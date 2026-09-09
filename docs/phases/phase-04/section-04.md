@@ -1,65 +1,104 @@
-# Section 04 — Confidence Model & Gated Exit Conditions
+# Section 04 — EvidencePlan and Progressive Retrieval
 
 ## Objective
 
-Implement the composite Confidence Model formula (§B.4) as a standalone, pure, unit-tested function, and implement the Requirements Engine's 3-way exit condition (§E.4) on top of it — the mechanism that decides when the questioning loop stops.
+Give each activated slot a bounded, inspectable plan for how it may obtain repository evidence — and execute those plans with **targeted** RI calls, an in-session query cache, and a hard budget. Do not implement a learned router, RRF, or an unrestricted tool loop.
 
 ## Why It Exists
 
-Confidence is, per the blueprint, "a load-bearing gate" used across the entire platform (requirements exit, design escalation, auto-merge eligibility). Building the formula once, here, as a pure function with no agent/graph dependency, means every later consumer (Phase 05's Confidence Scorer agent, Phase 10's routing rules) calls the same tested implementation rather than each re-deriving it.
+Literal section-03 mapped question ids to RI methods in an implied per-question call. Without a plan, the engine either over-fetches (semantic on every slot) or under-specifies (always `get_architecture_summary`). `EvidencePlan` makes exploration **budgeted and auditable** (Principle 5).
 
 ## Expected Architecture
 
-`packages/common/confidence.py` implements:
+Plans live on the question YAML (`evidence_plan`) so they are policy, not buried in Python. `plans.py` validates; `retrieve.py` executes.
 
-```python
-def compute_confidence(
-    retrieval_coverage: float,
-    precedent_strength: float,
-    validator_agreement: float,
-    static_check_cleanliness: float,
-) -> float:
-    ...  # 0.35/0.20/0.30/0.15 weighted sum, per §B.4
+```text
+EvidencePlan:
+  need: string                  # e.g. existing_auth_module
+  methods:                      # ordered; stop when extractor accepts
+    - signal: snapshot | manifest | symbol | lexical | graph | semantic
+      # signal-specific fields: query, query_from_claims, symbol_id_from,
+      # paths_from_snapshot, top_k, min_score, depth
+      extractor: named deterministic extractor
+      budget: int               # max RI calls for this method
+  accept_as: fact | inference   # semantic may only be inference
+  on_insufficient: ask_human | unknown
+  max_ri_calls: int             # hard cap for the whole plan
 ```
 
-At this phase, `precedent_strength` and `validator_agreement` have no real data source yet (no episodic memory, no validators exist until Phase 05/06) — the function itself must still be complete and correct; callers at this phase pass conservative placeholder inputs (documented as such) or the function is tested purely in isolation with synthetic inputs, deferring real end-to-end confidence computation to Phase 05. `packages/requirements_engine/exit.py` implements the 3-way exit evaluator per §E.4, calling `compute_confidence` and checking against the phase floor (0.80, §B.4's table).
+### Progressive retrieval is **need-driven**, not a global ladder
+
+A fixed Tier 0→5 pipeline is the wrong default: "does `AuthService` exist?" should not start at architecture JSON. Use this **cost preference** only when the plan's method list is empty (it should not be):
+
+| Need | First signal | Then |
+|---|---|---|
+| Cheap situation ("languages?", "is there an `auth` service?") | snapshot / manifest | stop |
+| "Does symbol X exist?" / signature | `get_symbol_signature` / `get_file_structure` | lexical name search |
+| "Where is identifier JWT used?" | `search_codebase` | graph dependents of those files |
+| "What is the blast radius of touching `auth/service.py`?" | `get_impact_set` / `get_dependents` | stop |
+| "Code about session expiry" with no identifier | snapshot paths as `paths=` filter, then `search_concepts` | never FACT |
+
+**Semantic search is last, optional, and weak.** Phase 03 benchmark is ~96% success@5 overall, lexical was **unscored** on the measuring machine, graph missed adversarial attribute-call resolution (`g06`). Semantic relatedness is not proof. `accept_as` for `semantic` is `inference` only. Defaults: `top_k=3`, `min_score` set, `paths` from snapshot when possible.
+
+### Session retrieval cache
+
+Key: `(signal, normalized_query, paths, kinds, catalog_hash)`. Reuse hits across slots. This is how the engine avoids asking RI the same question twice. Do **not** skip `assert_fresh` (Phase 03 contract). Accept that each **distinct** RI call still hashes the tree; the cache only prevents duplicate queries.
+
+### Budgets and fail-closed signals
+
+- Per-plan `max_ri_calls` and a session cap (config; start with 16).
+- `ZoektUnavailableError` / `ZoektNotIndexedError`: mark lexical **unavailable**, skip that method, do not treat as zero hits.
+- `EmbeddingsNotIndexedError`: skip semantic the same way.
+- `SymbolNotFoundError`: evidence of absence **for that id**, not for the concept.
+- `StaleIndexError`: stop retrieval, freeze auto-answer, surface to the caller.
+- Never call `find_relevant_context`.
+
+### Evidence records
+
+Each call writes `EvidenceRecord`: signal, query, hit refs (path/symbol/line), excerpt (short), score if any, `catalog_hash`, latency, cache-hit flag. Traces are the silver labels Phase 15 needs for a future router. Emit `tool_call` telemetry via `TelemetrySink` when a sink is provided; tests may use `NoOpTelemetrySink`.
+
+No LLM judge. Extractors are deterministic (JSON path on snapshot, symbol exists, lexical identifier in snippet, graph neighborhood non-empty). If an extractor cannot decide, status stays UNKNOWN.
 
 ## Dependencies
 
-None additional beyond Sections 01–03 (needs a session's retrieval-coverage signal from the auto-answer step to feed the formula).
+Section 02 (slots), Section 03 (snapshot), Phase 03 API.
 
 ## Atomic Implementation Tasks
 
-1. Implement `compute_confidence()` exactly per §B.4's formula and weights, with input validation (each signal in `[0,1]`).
-2. Implement Fail-Closed behavior explicitly: wrap the computation so that if any required signal is missing/unavailable, the function does not impute a default — it raises a distinguishable exception, and callers must treat that as "below floor," never as "assume high confidence" (§B.4's explicit rule, unit-tested here as a first-class case, mirroring Phase 00 Section 03's budget-check fail-closed pattern).
-3. Derive `retrieval_coverage` for a requirements session as a function of Section 03's auto-answer results (e.g., fraction of auto-answerable questions successfully resolved, or a similar defensible proxy) — document the exact derivation since it's a genuine design decision the blueprint doesn't fully specify at this granularity.
-4. Implement the 3-way exit evaluator (§E.4): (a) confidence ≥ 0.80 AND all mandatory questions answered → exit; (b) human explicitly accepts remaining open assumptions → exit, logging them for the Phase Handoff Packet (built properly in Phase 12, but the `open_assumptions` list itself starts being populated here); (c) confidence cannot be raised further → signal for HITL (the actual `interrupt()` wiring is Phase 05 — this phase's exit evaluator just returns a clear "needs HITL" result).
-5. Unit tests: formula produces expected output for known input combinations (including the ablation-relevant case of correlated signals, noted in §B.4 as a future recalibration concern — not solved now, just not broken by it); fail-closed behavior triggers "below floor" on a missing-signal simulation; all three exit conditions are independently testable against synthetic session states.
+1. YAML `evidence_plan` schema + validation (unknown signal = load error).
+2. `execute_plan(plan, snapshot, ri, cache, claims) -> list[EvidenceRecord]`.
+3. Named extractors in `auto_answer.py` (wired in Section 05; this section can stub the protocol).
+4. Query cache + session RI budget.
+5. Unit tests with fake RI: snapshot hit skips later methods; semantic never returned as FACT; Zoekt error skips lexical; cache prevents a second identical `search_codebase`.
+6. Integration: one auth slot against the Phase 03 corpus uses snapshot and/or lexical, not semantic, to find `auth/service.py`.
 
 ## Manual Testing Procedure
 
-1. Run the three demo scenarios end-to-end (question queue + auto-answer + confidence + exit evaluation) and observe which exit condition fires for each: the well-specified scenario should hit condition (a) quickly; the vague scenario should require several rounds and may hit condition (b) or (c) depending on how the demo script scripts human answers.
-2. Manually verify the printed confidence score at each round is plausible given the mix of auto-answered vs. human-answered vs. still-open questions.
+1. Log every RI method name and arguments for the well-specified demo.
+2. Confirm semantic is not called when snapshot already satisfied the plan.
+3. Run with Zoekt missing: lexical slots skip, engine still exits fail-closed rather than "no JWT in repo."
 
 ## Expected Demo
 
-CLI output for each of the three scenarios showing the confidence score after each answered question, converging (or not) toward the 0.80 floor, ending with the exit condition that fired printed explicitly.
+A printed EvidencePlan execution trace: method, cache hit/miss, evidence refs, remaining budget.
 
 ## Acceptance Criteria
 
-- [ ] `compute_confidence()` matches §B.4's formula and weights exactly, and is unit-tested independent of any session/engine context.
-- [ ] A simulated missing/failed signal results in "below floor," never an imputed passing score — this is directly tested, not just asserted in a docstring.
-- [ ] All three exit conditions from §E.4 are independently reachable and tested against synthetic scenarios.
-- [ ] The three demo scenarios from the Phase 04 README each exit via a plausible, explainable condition.
+- [ ] Plans are config, validated at load.
+- [ ] Semantic cannot produce FACT.
+- [ ] Duplicate RI queries in one session are cached.
+- [ ] Missing Zoekt/embeddings/stale index follow fail-closed contracts.
+- [ ] `find_relevant_context` is never called.
 
 ## Risks
 
-- **Risk:** The v1 weights (§B.4) are stated as starter values pending shadow-mode recalibration (§L.5) — using them uncritically here is correct *for now*, but it would be a mistake to treat them as validated. **Mitigation:** explicitly note in code comments that these weights are provisional and named for future recalibration (Phase 15), so nobody mistakes them for tuned constants later.
+- **Risk:** Generic plans all fall through to semantic. **Mitigation:** bank review; tests that well-specified stack slots do not call `search_concepts`.
 
 ## Future Improvements
 
-- Logistic-regression recalibration of the weights against real task outcomes, with a drop-one ablation for `retrieval_coverage`/`validator_agreement` correlation — Phase 15 (§L.3/§L.5), requires real outcome data that doesn't exist until Phase 05+.
+- Phase 15: train a retrieval-needed classifier on these traces.
+- Phase 12: optional fusion **behind** RI, still not inside this engine.
 
 ## Research Opportunities
 
-This is one of the roadmap's clearest research hooks: once Phase 15's golden dataset exists, revisit whether all four signals are actually independent contributors, or whether the formula should be simplified/reweighted. Treat the current formula as baseline v1, not ground truth.
+Per-need method order vs a single global escalation — log `plan.need` × `first_successful_signal` from day one.

@@ -1,4 +1,4 @@
-.PHONY: up migrate test lint typecheck dev checkpointer chaos zoekt-install zoekt-pull zoekt-webserver zoekt-webserver-stop
+.PHONY: up migrate test lint typecheck dev checkpointer chaos benchmark ri-demo zoekt-install zoekt-pull zoekt-webserver zoekt-webserver-stop
 
 # uv + Python 3.12 are required (see docs/techstack.md).
 UV ?= uv
@@ -26,6 +26,14 @@ test:
 
 chaos:
 	$(UV) run pytest tests/chaos -v
+
+# Section 06 success@5 against the frozen labeled corpus. Needs `make up && make migrate`.
+benchmark:
+	$(UV) run python tests/benchmark/retrieval_precision.py
+
+# Phase 03 live demo: uncommitted edit -> incremental reindex -> RepositoryIntelligence.
+ri-demo:
+	$(UV) run python scripts/demo_repo_intelligence.py
 
 lint:
 	$(UV) run ruff check packages tests scripts db apps

@@ -11,6 +11,7 @@ from common.config import get_settings
 from common.db import get_engine, make_session_factory
 from common.task_repository import get_task
 from common.tracing import emit_node_event, get_sink
+from worker.hitl_jobs import escalate_expired_hitl
 
 
 def redis_settings_from_config() -> RedisSettings:
@@ -78,7 +79,7 @@ async def ping_task(ctx: dict, task_id: str) -> dict:
 
 
 class WorkerSettings:
-    functions: ClassVar[list] = [ping_task]
+    functions: ClassVar[list] = [ping_task, escalate_expired_hitl]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = redis_settings_from_config()

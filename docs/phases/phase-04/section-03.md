@@ -1,54 +1,121 @@
-# Section 03 — Auto-Answer-from-Repo Integration
+# Section 03 — Session Repository Snapshot
 
 ## Objective
 
-Before any question reaches a human, check whether Repository Intelligence (Phase 03) can answer it with high confidence — tech stack, existing API contracts, current test coverage, existing patterns — and surface auto-answered questions transparently (not hidden) per §E.4.
+Build a **session-level, compact, cached** repository situation model for the requirements engine. Generate it once per session from Phase 03 metadata (plus a bounded manifest read). Do **not** create a second architecture summary, and do **not** scan or embed the tree.
 
 ## Why It Exists
 
-This is the engine's core differentiator over a static intake form: it does real retrieval work before bothering a human, and shows its work. This is also the first place in the roadmap where Phase 03's Repository Intelligence and Phase 04's engine actually meet — proving the dependency drawn in `architecture.md` is real, not just diagrammed.
+Literal section-03 called RI **per auto-answerable question**. Every `RepositoryIntelligence` read already walks the working tree and SHA-256s eligible files (`assert_fresh`). Repeating `get_architecture_summary()` is worse: it also loads **all symbols** (`api.py` `_all_symbols`) and builds unbounded JSON (`cross_service_dependencies` is every cross-service edge).
+
+A session snapshot answers cheap questions ("how many services?", "is there an `auth/` tree?", "what languages?") without dumping the repository into the LLM.
 
 ## Expected Architecture
 
-Each `Question` with `auto_answerable_from == "repo_intelligence"` gets routed, before being queued for a human, through a `RepoAnswerResolver` that maps the question's category/intent to specific `RepositoryIntelligence` calls (e.g., "what's the current tech stack" → `get_architecture_summary()`; "does an API contract already exist for this resource" → `search_concepts`/`get_file_structure` against the relevant module). The resolver returns either a confident answer (with the retrieved evidence attached) or `None` (defer to human). Auto-answered questions are recorded in the session trace with their evidence, not silently dropped.
+`snapshot.py` + `manifests.py`. The snapshot is a Phase 04 object. **Do not add it to the RI API** (no Phase 03 contract change).
+
+### Generated once
+
+On session start, after `index_status()`:
+
+1. If `unindexed` or `stale` → fail closed (`StaleIndexError` / explicit engine error). The CLI may tell the operator to `reindex`. The engine must **not** pass `refresh=True` (that embeds).
+2. `get_architecture_summary()` **one call**.
+3. `get_aider_repo_map(top_n=20)` **one call**.
+4. Bounded manifest extract (below).
+5. Record RI capability: if a cheap probe is needed, treat missing Zoekt/embeddings as **capability flags**, not as "no matches."
+
+Cache key: `(repo_root, catalog_hash)`. Reuse for the whole session. Rebuild only when `catalog_hash` changes or a later RI call raises `StaleIndexError` (then stop auto-answer; do not keep using the old snapshot as if current).
+
+### What is in the snapshot
+
+| Field | Source | LLM? |
+|---|---|---|
+| `repo_root`, `catalog_hash`, `file_count`, `index_state` | `index_status` | No |
+| `languages` | union of summary `tech_stack` (suffix languages) | No |
+| `services` + per-service file count, entry points, key symbols, deps | capped projection of summary `service_map` | No |
+| `api_boundaries`, `database_entities`, `shared_modules` | capped lists from summary | No |
+| `top_files` | `get_aider_repo_map` | No |
+| `manifest_facts` | allowlist disk read | No |
+| `capabilities` | zoekt / embeddings / graph known-available | No |
+| `truncated` + `token_estimate` | caps | No |
+
+**Hard caps** (stay near §H.1 `ARCH_SUMMARY` ≈ 2k tokens): max 40 services (remainder as `other_service_count`); max 5 entry points and 5 key symbols per service; max 20 API / DB / shared paths; drop full `cross_service_dependencies` from the snapshot (the graph signal exists for targeted follow-up). If `file_count` is huge, prefer counts over enumerations.
+
+### What is *not* in the snapshot
+
+- File bodies, all symbols, all import edges
+- A second LLM "repo summary"
+- Framework names from `tech_stack` — Phase 03 sets `tech_stack` from **file suffix only** (`summary.py` `_LANGUAGE_BY_SUFFIX`)
+- Test existence as a boolean unless a later EvidencePlan searches for it (tests have low in-degree, so they will not appear in the repo map)
+
+### Manifest allowlist (justified extra)
+
+Phase 03's catalog walks **only** `.py` / `.ts` / `.tsx` (`SUPPORTED_EXTENSIONS`). `pyproject.toml` / `package.json` are **not indexed**. The snapshot may read, from disk, at most these names if present, max 32 KiB each:
+
+`pyproject.toml`, `requirements.txt`, `Pipfile`, `package.json`, `go.mod`, `Cargo.toml`, `pom.xml`, `build.gradle`
+
+Parse enough to extract dependency **names** (not lockfile graphs). Provenance: `manifest:pyproject.toml`. This is how "is FastAPI declared?" becomes a FACT without lexical search. It is O(1) named files, not a tree walk.
+
+### Targeted RI attaches how
+
+The snapshot is **Tier 1 evidence**. Slots still run EvidencePlans (Section 04) when the snapshot cannot answer. Example: snapshot shows service `auth` + manifest `fastapi` → FACT "auth module exists" + FACT "FastAPI is a declared dependency." "Use JWT" stays UNKNOWN/INFERENCE until lexical/symbol evidence, and stays a DECISION if the user said it.
+
+### Scale
+
+| Repo size | Snapshot behavior |
+|---|---|
+| ~10k files (Phase 03 MVP) | One summary call is acceptable; cache it |
+| ~100k | Same shape, caps bind; inherited cost is Phase 03 `_all_symbols` + whole-tree hash on every later RI read — **do not bypass `assert_fresh`** |
+| 1M+ | Federation is Phase 11. Phase 04 still uses the capped projection and targeted queries; it must not enumerate services without `other_service_count` |
+
+### Provenance
+
+Every snapshot field used as evidence gets an `EvidenceRecord` with `retrieved_via="snapshot"` or `"manifest"` and the session `catalog_hash`.
 
 ## Dependencies
 
-Phase 03 (`RepositoryIntelligence`), Section 02 (question queue to intercept before human-facing).
+Phase 03 `RepositoryIntelligence`. Section 01 `EvidenceRecord`.
 
 ## Atomic Implementation Tasks
 
-1. Define the mapping from auto-answerable question categories/IDs to specific `RepositoryIntelligence` method calls — this mapping is itself config-like and should live alongside the question bank (Section 01), not buried in code, since it will need tuning.
-2. Implement `RepoAnswerResolver.try_answer(question, repo_intel) -> AutoAnswer | None`, where `AutoAnswer` carries `{answer_text, evidence_refs, confidence}`.
-3. Implement a confidence threshold for accepting an auto-answer vs. deferring to a human (a question with a weak/ambiguous retrieval result should still reach the human, not be force-answered incorrectly) — this is a direct, small-scale application of Fail-Closed (Principle 8): low-confidence auto-answer attempts default to "ask the human," never to "guess."
-4. Wire `RepoAnswerResolver` into `QuestionQueue.next()`: before yielding a question to the caller, attempt auto-answer first; if successful, record it and skip to the next question; only yield genuinely human-bound questions.
-5. Unit/integration tests against the Phase 03 fixture repo: a tech-stack question is correctly auto-answered from `get_architecture_summary()`; a business-objective question (never auto-answerable) always reaches the human; a borderline retrieval (low confidence) correctly defers to human rather than guessing.
+1. `SessionRepoSnapshot` Pydantic model with caps and `truncated`.
+2. `build_snapshot(ri) -> SessionRepoSnapshot` — status, summary, map, manifests; fail closed on stale/unindexed.
+3. In-process cache keyed by `(repo_root, catalog_hash)`.
+4. Manifest parser with size limits; missing files are omission, not error.
+5. Unit tests: caps; language vs framework; FastAPI from fixture `pyproject` **or** documented skip if the corpus has no manifest; stale index raises.
+6. Integration test against the Phase 03 benchmark corpus: services include `auth` / `billing` / `storage` / `web` / `shared`.
+7. Extend `tests/contract/test_repo_intel_boundary.py` `CALLER_TREES` to include `packages/requirements_engine`.
 
 ## Manual Testing Procedure
 
-1. Run the well-specified demo scenario (Phase 04 README) against the Phase 03 fixture repo and confirm several questions are auto-answered with correct, repo-grounded evidence shown.
-2. Manually inspect the auto-answered evidence for accuracy — this is a case where "the retrieval found *something*" is not sufficient; the *answer* must be correct.
-3. Confirm the session trace clearly distinguishes auto-answered questions (with evidence) from human-answered ones — this is what Screen 2 (§P, Phase 09) will render later, so get the data shape right now.
+1. Print snapshot JSON for the benchmark corpus. Confirm it is small and has no file bodies.
+2. Confirm `languages` is `["python"]`, not `["FastAPI"]`.
+3. Touch a corpus file without reindexing; confirm snapshot build fails closed.
 
 ## Expected Demo
 
-CLI output showing a mix of auto-answered questions (with their retrieved evidence printed) interleaved with genuinely human-facing questions — visually proving the "auto-answered, not hidden" principle from §E.4.
+One printed snapshot plus `catalog_hash`, `token_estimate`, and `truncated`.
 
 ## Acceptance Criteria
 
-- [ ] Auto-answerable questions are correctly resolved from Repository Intelligence for the fixture repo, with correct, evidence-backed answers.
-- [ ] Low-confidence retrieval defers to the human rather than guessing (Fail-Closed applied at this small scale, tested explicitly).
-- [ ] Every auto-answered question retains a visible evidence reference in the session trace — never silently answered with no audit trail.
-- [ ] Auto-answer rate on the well-specified demo scenario is high, and near-zero on the vague-request demo scenario (since a from-scratch/ambiguous request has little for the repo to answer) — both behaviors are asserted in tests, not just observed anecdotally.
+- [ ] Snapshot is generated **once** per session and reused.
+- [ ] No LLM is used to generate it.
+- [ ] No new RI public method.
+- [ ] Size caps are tested.
+- [ ] Stale/unindexed fails closed.
+- [ ] Requirements engine does not import RI internals.
 
 ## Risks
 
-- **Risk:** Overconfident auto-answering could silently lock in a wrong assumption that only surfaces as a Design-phase gap much later (an expensive rollback per §D.3's `FL-03` loop). **Mitigation:** the confidence threshold in task 3 is the primary defense; additionally, ensure the evidence is always retained so a human reviewing Screen 2 later (Phase 09) can catch a wrong auto-answer even after the fact.
+- **Risk:** Treating snapshot `tech_stack` as frameworks. **Mitigation:** field naming (`languages`) and tests.
+- **Risk:** Snapshot grows with service count. **Mitigation:** caps + `other_service_count`.
 
 ## Future Improvements
 
-- Expand auto-answerable question coverage as Repository Intelligence matures (Phase 11/12) — a genuinely growing list.
+- Phase 11: shard-level L4 summaries replace a monorepo-wide `_all_symbols` load.
+- Phase 12: replace in-degree map with personalized PageRank.
+- Optional: index manifests in RI so Phase 04 does not read disk. Not required now.
 
 ## Research Opportunities
 
-Track auto-answer accuracy (correct vs. later-corrected) once real usage exists — feeds directly into whether the confidence threshold from task 3 needs tuning (a good candidate for the confidence-model recalibration work in Phase 15).
+Whether `file_count`-conditioned cap tables beat a single cap — measure once a >10k corpus exists.

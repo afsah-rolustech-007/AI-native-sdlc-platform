@@ -58,8 +58,8 @@ This is the real dependency graph — not the SDLC phase order (intake→...→d
                       ▼                          ▼
             ┌────────────────────────────────────────────┐
             │  Dynamic Requirements Engine (§E.4)          │
-            │  — needs RI for auto-answer, needs Agent      │
-            │    base + Confidence Model (§B.4) for exit    │
+            │  — evidence-first; RI snapshot + targeted     │
+            │    retrieval; B.4 is platform fn (Phase 05)   │
             └───────────────────┬───────────────────────────┘
                                 │
                                 ▼
@@ -179,6 +179,19 @@ This is the single most important architectural decision to internalize before w
 ### 4.2 Why the Workflow Policy Engine Is Deliberately Late
 
 `resolve_workflow_profile()` (§F.3) is a pure, ordered, unit-testable rule function — but it can only be *validated* against real behavior once real agents exist across enough of the SDLC to observe how risk tier, confidence, and work type actually correlate with good outcomes. Building it early would mean guessing at rules with no data to check them against. The architecture handles this by using `WorkflowProfile.most_conservative()` (§F.1 — explicit field values, not an informal convention) everywhere until Phase 10 — every phase before that runs the standard/conservative path, not a shortcut path. This is why Phase 10 depends on Phases 5–9: it is a formalization and testing of routing logic that was implicitly "everything conservative" until then.
+
+### 4.3 How Phase 04 uses Repository Intelligence
+
+The Dynamic Requirements Engine is a **standalone package**, not a subgraph. Phase 05 will drive it from the requirements node. It queries `RepositoryIntelligence` like every other consumer: four **unfused** signals, fail-closed freshness, no `find_relevant_context` until Phase 12.
+
+It is **evidence-first**, not a per-question interview (see `docs/phases/phase-04/README.md` and `docs/decisions/2026-09-02-phase-04-evidence-first-requirements.md`):
+
+- **Do not** generate a second architecture summary. Call `get_architecture_summary()` once per session, cap it, and cache on `catalog_hash`. That JSON is AST-derived; `tech_stack` is language-from-suffix (`python`, `typescript`), not a framework name.
+- **Do not** dump the tree (or the snapshot) into the extract LLM. Extraction is repo-blind; repository facts come from the snapshot and targeted RI.
+- Phase 03's catalog indexes `.py`/`.ts`/`.tsx` only. Framework/dependency **names** may come from a bounded allowlist of manifest files (`pyproject.toml`, `package.json`, …) or from lexical search — not from an LLM repo tour.
+- Semantic search is last and produces `INFERENCE`, never `FACT`. User DECISIONs are never overwritten by repository FACTs.
+
+`compute_confidence()` (§B.4) remains the platform formula and fail-closes on missing inputs. The Phase 04 loop exits on `RequirementsSufficiency`; Phase 05's Confidence Scorer is the first honest B.4 caller.
 
 ---
 

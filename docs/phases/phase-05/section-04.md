@@ -2,7 +2,7 @@
 
 ## Objective
 
-Implement the Requirements Analyst agent, wiring Phase 04's standalone `QuestioningEngine` into a real graph node that uses real `interrupt()`/`Command(resume=...)` calls (Phase 01 §03) for every human-facing question, replacing Phase 01's stub `requirements_node`.
+Implement the Requirements Analyst agent, wiring Phase 04's standalone evidence-first `RequirementsEngine` into a real graph node that uses real `interrupt()`/`Command(resume=...)` calls (Phase 01 §03) for every **ranked human-facing** question, replacing Phase 01's stub `requirements_node`.
 
 ## Why It Exists
 
@@ -10,16 +10,16 @@ Phase 04 proved the engine's logic works in isolation. This section proves it wo
 
 ## Expected Architecture
 
-The `requirements` node runs a loop: call `QuestionQueue.next()`; if a question was auto-answered (Phase 04 §03), continue immediately; if it needs a human, call `interrupt({...question payload...})`; on resume, call `QuestionQueue.answer(...)`; repeat until `QuestionQueue` is exhausted or the exit evaluator (Phase 04 §04) fires. Because this is a *loop* inside one graph node rather than one interrupt per node (unlike Phase 01's single-interrupt stub), this section must handle multiple sequential interrupts within the same node's execution — verify this is a supported LangGraph pattern (looping `interrupt()` calls within one node) and adjust the node/subgraph structure if a different topology (e.g., a dedicated per-question sub-node) is needed.
+The `requirements` node drives Phase 04's **evidence-first** `RequirementsEngine` (not a question-first `QuestionQueue` interview). Loop: `engine.step()`; on `auto_answer` / snapshot / retrieval events, continue without pausing; on `ask_human`, call `interrupt({...rendered question + evidence...})`; on resume, `engine.answer(...)`; repeat until the engine returns a 3-way exit (`spec_ready` / `accept_gaps` / `needs_hitl` from Phase 04 `RequirementsSufficiency`, **not** a placeholder §B.4 score). Because this is a *loop* inside one graph node rather than one interrupt per node (unlike Phase 01's single-interrupt stub), this section must handle multiple sequential interrupts within the same node's execution — verify this is a supported LangGraph pattern (looping `interrupt()` calls within one node) and adjust the node/subgraph structure if a different topology (e.g., a dedicated per-question sub-node) is needed.
 
 ## Dependencies
 
-Phase 04 (full `QuestioningEngine`), Phase 01 §03 (interrupt/resume), Section 01–02 (BaseAgent, MASC).
+Phase 04 (full `RequirementsEngine`), Phase 01 §03 (interrupt/resume), Section 01–02 (BaseAgent, MASC).
 
 ## Atomic Implementation Tasks
 
 1. Verify LangGraph's supported pattern for multiple sequential `interrupt()` calls within a single node's execution across resumes (this is a genuine technical unknown worth spiking before committing to a node topology) — document the finding.
-2. Implement the `requirements` node per the finding from task 1 — either a looping single node, or a small internal subgraph with one node per question-round.
+2. Implement the `requirements` node per the finding from task 1 — either a looping single node, or a small internal subgraph with one node per **human-question** round (auto-answers must not become graph interrupts).
 3. Wire each human-facing `interrupt()` payload to resemble the eventual `HITLRequest` shape (§B.2) more closely than Phase 01's placeholder did, with `request_type="clarification"` set explicitly (not left implicit) — this node is the first real producer of `HITLRequest`-shaped data, feeding Phase 08's `hitl_log` persistence and Phase 09's Screen 2/7.
 4. On exit, write the final `RequirementsSpec` (§B.2's TypedDict) into `SDLCState.requirements`, and log `open_ambiguities`/`assumptions` from Phase 04's exit evaluator.
 5. Integration test: run a full multi-round requirements session through the real graph (using the vague-request demo scenario from Phase 04), including a mid-session process kill and resume (reusing Phase 01 §04's chaos harness pattern) — assert the session resumes with the correct next question, not from the start.

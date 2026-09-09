@@ -34,9 +34,7 @@ def symbol_from_row(row: SymbolRow) -> Symbol:
 async def delete_repo_index(session: AsyncSession, repo_root: Path) -> None:
     """Drop catalog + symbols + snapshot for this working tree (CASCADE on symbols)."""
     key = _root_key(repo_root)
-    await session.execute(
-        delete(RepoIndexSnapshotRow).where(RepoIndexSnapshotRow.repo_root == key)
-    )
+    await session.execute(delete(RepoIndexSnapshotRow).where(RepoIndexSnapshotRow.repo_root == key))
     await session.execute(delete(IndexedFileRow).where(IndexedFileRow.repo_root == key))
 
 
@@ -97,9 +95,7 @@ async def upsert_snapshot(
     session: AsyncSession, repo_root: Path, *, file_count: int, catalog_hash: str
 ) -> None:
     key = _root_key(repo_root)
-    await session.execute(
-        delete(RepoIndexSnapshotRow).where(RepoIndexSnapshotRow.repo_root == key)
-    )
+    await session.execute(delete(RepoIndexSnapshotRow).where(RepoIndexSnapshotRow.repo_root == key))
     session.add(
         RepoIndexSnapshotRow(
             repo_root=key,
@@ -109,6 +105,43 @@ async def upsert_snapshot(
         )
     )
     await session.flush()
+
+
+async def list_catalog_hashes(session: AsyncSession, repo_root: Path) -> dict[str, str]:
+    """`{relative_path: content_hash}` for this working tree — Section 05's diff input."""
+    result = await session.execute(
+        select(IndexedFileRow.relative_path, IndexedFileRow.content_hash).where(
+            IndexedFileRow.repo_root == _root_key(repo_root)
+        )
+    )
+    return {str(row.relative_path): str(row.content_hash) for row in result}
+
+
+async def get_catalog_hash(session: AsyncSession, repo_root: Path) -> str | None:
+    """Stored repo-level catalog hash, or None when this tree was never indexed."""
+    result = await session.execute(
+        select(RepoIndexSnapshotRow.catalog_hash).where(
+            RepoIndexSnapshotRow.repo_root == _root_key(repo_root)
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def replace_file_index(
+    session: AsyncSession,
+    repo_root: Path,
+    snapshot: FileSnapshot,
+    symbols: list[Symbol],
+    parse_status: ParseStatus,
+) -> None:
+    """Per-path replace for one created/modified file. Caller owns the transaction.
+
+    Deleting the `indexed_files` row cascades this path's `symbols`, so a modified
+    file never leaves rows from its previous parse behind.
+    """
+    await delete_file_index(session, repo_root, snapshot.relative_path)
+    await insert_indexed_file(session, repo_root, snapshot, parse_status)
+    await insert_symbols(session, repo_root, symbols)
 
 
 async def get_indexed_file(

@@ -1,0 +1,228 @@
+{
+  "corpus": "tests/benchmark/corpus",
+  "metric": "success@5",
+  "notes": "Frozen labels. Gold answers were read off the corpus source, not off system output. Do not edit a label to make a run pass; fix retrieval or record the miss.",
+  "queries": [
+    {
+      "id": "c01",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "verify that a bearer token signature is valid and not expired",
+      "gold": ["auth/tokens.py::verify_token"]
+    },
+    {
+      "id": "c02",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "hash a password with a salt before storing it",
+      "gold": ["auth/passwords.py::hash_password"]
+    },
+    {
+      "id": "c03",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "compare a submitted password against the stored hash",
+      "gold": ["auth/passwords.py::verify_password"]
+    },
+    {
+      "id": "c04",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "pool of reusable database connections",
+      "gold": [
+        "storage/connection.py::DatabasePool",
+        "storage/connection.py::DatabasePool.open_pool",
+        "storage/connection.py::DatabasePool.acquire"
+      ]
+    },
+    {
+      "id": "c05",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "log a user in with their email and password",
+      "gold": ["auth/service.py::AuthService.login"]
+    },
+    {
+      "id": "c06",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "capture a payment from a customer",
+      "gold": ["billing/charges.py::ChargeProcessor.charge"]
+    },
+    {
+      "id": "c07",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "give money back to the customer for an earlier payment",
+      "gold": ["billing/charges.py::ChargeProcessor.refund"]
+    },
+    {
+      "id": "c08",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "check that an email address is well formed",
+      "gold": ["shared/validation.py::validate_email"]
+    },
+    {
+      "id": "c09",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "read configuration values from environment variables",
+      "gold": ["shared/config.py::load_settings", "shared/config.py::Settings"]
+    },
+    {
+      "id": "c10",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "set up application logging handlers and level",
+      "gold": ["shared/logging_setup.py::configure_logging"]
+    },
+    {
+      "id": "c11",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "retry a flaky operation with exponential backoff",
+      "gold": ["shared/retry.py::retry_with_backoff"]
+    },
+    {
+      "id": "c12",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "build the plain text invoice document for a customer",
+      "gold": ["billing/invoices.py::render_invoice"]
+    },
+    {
+      "id": "c13",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "format an integer cent amount as a currency string",
+      "gold": ["billing/invoices.py::format_money"]
+    },
+    {
+      "id": "c14",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "look up a single user account by email address",
+      "gold": ["storage/repository.py::UserRepository.find_by_email"]
+    },
+    {
+      "id": "c15",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "http endpoint that exchanges credentials for a token",
+      "gold": ["web/api/routes.py::login_route"]
+    },
+    {
+      "id": "c16",
+      "type": "find_by_concept",
+      "signal": "semantic",
+      "query": "wire settings repositories and services together at startup",
+      "gold": ["web/main.py::build_app"]
+    },
+    {
+      "id": "s01",
+      "type": "find_similar_implementation",
+      "signal": "semantic",
+      "query": "def check_secret(candidate: str, saved: str) -> bool:\n    \"\"\"Constant-time compare a supplied secret with the saved hash.\"\"\"\n    salt, _, expected = saved.partition(\"$\")\n    derived = hashlib.pbkdf2_hmac(\"sha256\", candidate.encode(), bytes.fromhex(salt), 100_000)\n    return hmac.compare_digest(derived.hex(), expected)\n",
+      "gold": ["auth/passwords.py::verify_password"]
+    },
+    {
+      "id": "s02",
+      "type": "find_similar_implementation",
+      "signal": "semantic",
+      "query": "def is_positive_cents(value: int) -> bool:\n    \"\"\"Return True when the amount is a positive whole number of cents.\"\"\"\n    return isinstance(value, int) and value > 0\n",
+      "gold": ["shared/validation.py::validate_amount"]
+    },
+    {
+      "id": "s03",
+      "type": "find_similar_implementation",
+      "signal": "semantic",
+      "query": "def render_price(cents: int, currency: str = \"USD\") -> str:\n    \"\"\"Render an integer cent amount as a human-readable currency string.\"\"\"\n    return f\"{cents // 100}.{cents % 100:02d} {currency}\"\n",
+      "gold": ["billing/invoices.py::format_money"]
+    },
+    {
+      "id": "g01",
+      "type": "find_caller",
+      "signal": "graph",
+      "target": "auth/tokens.py::verify_token",
+      "gold": ["auth/service.py::AuthService.current_user"]
+    },
+    {
+      "id": "g02",
+      "type": "find_caller",
+      "signal": "graph",
+      "target": "auth/passwords.py::verify_password",
+      "gold": ["auth/service.py::AuthService.login"]
+    },
+    {
+      "id": "g03",
+      "type": "find_caller",
+      "signal": "graph",
+      "target": "shared/validation.py::validate_amount",
+      "gold": [
+        "billing/charges.py::ChargeProcessor.charge",
+        "billing/charges.py::ChargeProcessor.refund"
+      ]
+    },
+    {
+      "id": "g04",
+      "type": "find_caller",
+      "signal": "graph",
+      "target": "billing/invoices.py::format_money",
+      "gold": ["billing/invoices.py::render_invoice"]
+    },
+    {
+      "id": "g05",
+      "type": "find_caller",
+      "signal": "graph",
+      "target": "shared/config.py::load_settings",
+      "gold": ["web/main.py::build_app"]
+    },
+    {
+      "id": "g06",
+      "type": "find_caller",
+      "signal": "graph",
+      "adversarial": true,
+      "comment": "Callers reach acquire() through self.pool, an instance attribute. Section 03 resolves direct-name calls only, so this is a known recall limit, not a mislabel.",
+      "target": "storage/connection.py::DatabasePool.acquire",
+      "gold": [
+        "storage/repository.py::UserRepository.find_by_email",
+        "storage/repository.py::InvoiceRepository.save"
+      ]
+    },
+    {
+      "id": "g07",
+      "type": "find_dependents",
+      "signal": "graph",
+      "target": "shared/config.py",
+      "gold": [
+        "auth/service.py",
+        "auth/tokens.py",
+        "shared/logging_setup.py",
+        "storage/connection.py",
+        "web/main.py"
+      ]
+    },
+    {
+      "id": "l01",
+      "type": "find_symbol",
+      "signal": "lexical",
+      "query": "ChargeProcessor",
+      "gold": ["billing/charges.py"]
+    },
+    {
+      "id": "l02",
+      "type": "find_symbol",
+      "signal": "lexical",
+      "query": "pbkdf2_hmac",
+      "gold": ["auth/passwords.py"]
+    },
+    {
+      "id": "l03",
+      "type": "find_symbol",
+      "signal": "lexical",
+      "query": "validate_currency",
+      "gold": ["shared/validation.py", "billing/charges.py"]
+    }
+  ]
+}

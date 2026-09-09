@@ -58,7 +58,7 @@ async def db_session(migrated_database_url: str) -> AsyncIterator[AsyncSession]:
         await session.rollback()
         await session.execute(
             text(
-                "TRUNCATE TABLE symbols, indexed_files, repo_index_snapshots, "
+                "TRUNCATE TABLE code_embeddings, symbols, indexed_files, repo_index_snapshots, "
                 "cost_tracking, hitl_log, approvals, tasks CASCADE"
             )
         )

@@ -1,9 +1,14 @@
 """L1 symbol index and L0/L1 lexical search over the local working tree."""
 
+from repo_intel.api import RepositoryIntelligence
 from repo_intel.exceptions import (
+    EmbeddingDimensionError,
+    EmbeddingIndexError,
+    EmbeddingsNotIndexedError,
     FileNotIndexedError,
     FileParseError,
     FileTooLargeError,
+    GraphNotBuiltError,
     RepoIntelError,
     StaleIndexError,
     SymbolNotFoundError,
@@ -13,12 +18,16 @@ from repo_intel.exceptions import (
     ZoektSearchError,
     ZoektUnavailableError,
 )
+from repo_intel.graph.networkx_client import NetworkXClient
 from repo_intel.indexers.catalog import (
     MAX_FILE_SIZE_BYTES,
     FileSnapshot,
+    diff_snapshots,
+    read_paths,
     resolve_repo_root,
     walk_working_tree,
 )
+from repo_intel.indexers.incremental import IncrementalIndexer
 from repo_intel.indexers.treesitter import (
     get_file_structure,
     get_symbol_body,
@@ -28,17 +37,43 @@ from repo_intel.indexers.treesitter import (
     parse_source,
 )
 from repo_intel.indexers.zoekt_client import ZoektClient, search_codebase
-from repo_intel.models import ExtensionParseStats, IndexStats, SearchHit, Symbol
+from repo_intel.models import (
+    CatalogDiff,
+    CodeChunk,
+    EmbeddingIndexStats,
+    ExtensionParseStats,
+    ImpactSet,
+    IndexStats,
+    IndexStatus,
+    ReindexStats,
+    SearchHit,
+    Symbol,
+)
+from repo_intel.vector.pgvector_client import PgvectorClient
 
 __all__ = [
     "MAX_FILE_SIZE_BYTES",
+    "CatalogDiff",
+    "CodeChunk",
+    "EmbeddingDimensionError",
+    "EmbeddingIndexError",
+    "EmbeddingIndexStats",
+    "EmbeddingsNotIndexedError",
     "ExtensionParseStats",
     "FileNotIndexedError",
     "FileParseError",
     "FileSnapshot",
     "FileTooLargeError",
+    "GraphNotBuiltError",
+    "ImpactSet",
+    "IncrementalIndexer",
     "IndexStats",
+    "IndexStatus",
+    "NetworkXClient",
+    "PgvectorClient",
+    "ReindexStats",
     "RepoIntelError",
+    "RepositoryIntelligence",
     "SearchHit",
     "StaleIndexError",
     "Symbol",
@@ -49,12 +84,14 @@ __all__ = [
     "ZoektNotIndexedError",
     "ZoektSearchError",
     "ZoektUnavailableError",
+    "diff_snapshots",
     "get_file_structure",
     "get_symbol_body",
     "get_symbol_signature",
     "index_repo",
     "parse_file",
     "parse_source",
+    "read_paths",
     "resolve_repo_root",
     "search_codebase",
     "walk_working_tree",

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from repo_intel.indexers.catalog import (
     MAX_FILE_SIZE_BYTES,
+    read_paths,
     sha256_bytes,
     walk_working_tree,
 )
@@ -24,7 +25,7 @@ def test_walk_indexes_working_tree_files_without_git() -> None:
     assert "src/payments.py" in paths
     assert "ignored/secret.py" not in paths
     assert "README.md" not in paths
-    assert not (FIXTURE / ".git").exists()
+    assert not (FIXTURE / ".git").exists() 
 
 
 def test_content_hash_is_sha256_of_file_bytes() -> None:
@@ -75,6 +76,23 @@ def test_symlinks_are_not_followed(tmp_path: Path) -> None:
     (repo / "src" / "link.py").symlink_to(outside)
     paths = {item.relative_path for item in walk_working_tree(repo)}
     assert paths == {"src/inside.py"}
+
+
+def test_read_paths_reads_only_requested_eligible_files(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "auth.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "src" / "other.py").write_text("def b():\n    return 2\n", encoding="utf-8")
+    snapshots = read_paths(tmp_path, ["src/auth.py", "src/missing.py", "README.md"])
+    assert [item.relative_path for item in snapshots] == ["src/auth.py"]
+
+
+def test_read_paths_does_not_escape_repo_root(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "inside.py").write_text("def inside():\n    return 1\n")
+    (tmp_path / "outside.py").write_text("def outside():\n    return 1\n")
+    snapshots = read_paths(repo, ["../outside.py", "inside.py"])
+    assert [item.relative_path for item in snapshots] == ["inside.py"]
 
 
 def test_package_does_not_import_git() -> None:

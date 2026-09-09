@@ -6,7 +6,7 @@ Implement the Confidence Scorer agent (wiring Phase 04 §04's `compute_confidenc
 
 ## Why It Exists
 
-Phase 04 built the confidence formula against synthetic/placeholder signals. This section is where it gets real inputs: `retrieval_coverage` from Repository Intelligence's actual auto-answer hit rate, `validator_agreement` from this section's own new `Validator`(requirements), `static_check_cleanliness` (a lighter-weight signal at this phase — no code exists yet, so this maps to something like requirements-completeness/structure checks rather than lint results, which only apply from Phase 06 onward). This is also the first place `ApprovalGate` gates a real, meaningful decision (scope sign-off before design spend, §E.8).
+Phase 04 implemented `compute_confidence()` exactly per §B.4 and **does not call it with placeholders** (the requirements loop exits on `RequirementsSufficiency`). This section is the **first honest caller**: `retrieval_coverage` from the session's evidence/auto-answer stats, `validator_agreement` from this section's own `Validator`(requirements). `precedent_strength` still has no episodic memory — **omit/fail-closed, do not invent 0.5**. `static_check_cleanliness` at this phase is a structural completeness check (acceptance criteria present, mandatory slots answered), not lint — lint applies from Phase 06 onward. This is also the first place `ApprovalGate` gates a real, meaningful decision (scope sign-off before design spend, §E.8).
 
 ## Expected Architecture
 
@@ -19,7 +19,7 @@ Section 04 (`RequirementsSpec` to score/validate), Phase 04 §04 (confidence for
 ## Atomic Implementation Tasks
 
 1. Implement real `retrieval_coverage` derivation from the Requirements Analyst session's auto-answer statistics (Phase 04 §03).
-2. Implement `precedent_strength` as a defensible placeholder at this phase — episodic memory (Phase 06+ generates real task history) doesn't exist yet, so document this signal as returning a neutral/conservative constant until real historical data exists, rather than fabricating a fake "similarity search" against nothing.
+2. Implement `precedent_strength` **without imputation**: episodic memory does not exist yet (Phase 06+). Either leave the signal missing so `compute_confidence()` fail-closes (task treated below floor — consistent with §B.4) **or** pass it only once a documented, real source exists. Do **not** fabricate a similarity search against an empty store and do **not** pass a silent 0.5.
 3. Implement `Validator`(requirements)'s `consistency-checker` rule set as a real LLM-backed check (per §E.8's table, Fast tier) producing pass/fail plus specific gaps, feeding `validator_agreement` back into the Confidence Scorer.
 4. Implement `static_check_cleanliness` for the requirements phase as a structural completeness check (e.g., are acceptance criteria present and non-empty, are mandatory questions for this work_type answered) — again, document this as the requirements-phase interpretation of a signal that becomes literally "lint/type/security pass rate" once code exists (Phase 06+).
 5. Wire `ConfidenceScorer` to run after `Validator`(requirements) (since it needs `validator_agreement`), write `confidence_score` onto both `Task` and `SDLCState`.
@@ -46,7 +46,7 @@ This section's demo *is* Phase 05's overall closing demo (see README): a complet
 
 ## Risks
 
-- **Risk:** Using placeholder `precedent_strength` skews the confidence formula's real-world calibration until episodic memory exists. **Mitigation:** explicitly documented as provisional (consistent with Phase 04 §04's note that weights/signals are v1); Phase 15's recalibration work is the correct place to revisit this, not now.
+- **Risk:** Until episodic memory exists, a missing `precedent_strength` fail-closes §B.4 and every requirements session looks "below floor" to later routers. **Mitigation:** that is the specified Fail-Closed behavior — do not paper over it with a constant. Phase 06+ supplies the signal; Phase 15 recalibrates weights. Document the gap in the scorer's output.
 
 ## Future Improvements
 
@@ -54,4 +54,4 @@ This section's demo *is* Phase 05's overall closing demo (see README): a complet
 
 ## Research Opportunities
 
-Once several dozen real sessions exist, examine whether the placeholder `precedent_strength` constant measurably distorts routing decisions compared to omitting it entirely — informs whether the ablation study planned for Phase 15 should prioritize this signal.
+Once several dozen real sessions exist, compare fail-closed-on-missing `precedent_strength` vs a later real episodic signal — informs whether Phase 15's ablation should prioritize this input.

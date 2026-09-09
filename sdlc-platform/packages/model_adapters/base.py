@@ -65,6 +65,8 @@ class ModelRequest(BaseModel):
     phase: str | None = None
     agent_id: str | None = None
     operation: str | None = None
+    # Lets InstrumentedAdapter nest llm_call under BaseAgent's agent span.
+    parent_span_id: str | None = None
 
 
 class ModelChunk(BaseModel):

@@ -1,4 +1,4 @@
-"""SQLAlchemy tables for the working-tree catalog and L1 symbols.
+"""SQLAlchemy tables for the working-tree catalog, L1 symbols, and L3 embeddings.
 
 These are RI-specific (not in `final_plan.md` §R). `alembic check` includes them
 because `db/migrations/env.py` imports this module onto `common.models.Base`.
@@ -11,6 +11,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
@@ -23,8 +24,27 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import UserDefinedType
 
 from common.models import Base
+
+# Must match vector.constants.EMBEDDING_DIMENSIONS and migration 0003.
+EMBEDDING_DIMENSIONS = 2048
+
+
+class PgVector(UserDefinedType):
+    """pgvector `vector(N)` without importing a provider SDK or the pgvector Python extra.
+
+    Bind/result processing is unused: inserts go through CAST(:embedding AS vector).
+    """
+
+    cache_ok = True
+
+    def __init__(self, dimensions: int) -> None:
+        self.dimensions = dimensions
+
+    def get_col_spec(self, **kwargs: object) -> str:
+        return f"vector({self.dimensions})"
 
 
 class IndexedFileRow(Base):
@@ -89,3 +109,27 @@ class RepoIndexSnapshotRow(Base):
     )
     file_count: Mapped[int] = mapped_column(Integer, nullable=False)
     catalog_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class CodeEmbeddingRow(Base):
+    """One L3 chunk vector. No FK to `symbols` or `indexed_files`.
+
+    Section 05 deletes/reinserts `symbols` on every file modify. A CASCADE FK
+    would wipe embeddings and force a re-embed of unchanged chunks. Identity is
+    `(repo_root, symbol_id)`; `content_hash` is SHA-256 of `chunk_text`.
+    """
+
+    __tablename__ = "code_embeddings"
+    __table_args__ = (Index("idx_code_embeddings_file_path", "repo_root", "file_path"),)
+
+    repo_root: Mapped[str] = mapped_column(Text, primary_key=True)
+    symbol_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[object] = mapped_column(PgVector(EMBEDDING_DIMENSIONS), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_line: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_line: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    truncated: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))

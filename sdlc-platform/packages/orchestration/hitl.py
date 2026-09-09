@@ -1,7 +1,9 @@
-"""Design-phase HITL rehearsal.
+"""Pause the graph for a human (`interrupt()`) and record a tracing span.
 
-`interrupt()` is how LangGraph pauses. The payload only *resembles* `HITLRequest`.
-Postgres `hitl_log` is not written here — that bridge is Phase 08 / ApprovalGate.
+`interrupt()` = *how* we pause (LangGraph primitive).
+`hitl_log` / HITLRequest = *what* we ask the human (data).
+
+The Phase 01 design stub still does not write Postgres. ApprovalGate does.
 """
 
 from __future__ import annotations
@@ -28,32 +30,37 @@ DESIGN_APPROVAL_PAYLOAD: dict = {
 _open_hitl_spans: dict[str, str] = {}
 
 
-def interrupt_for_design_approval(
+def interrupt_with_span(
     task_id: str,
+    payload: dict,
     *,
+    name: str,
+    phase: str,
     sink: TelemetrySink | None = None,
 ) -> str:
-    """Pause at design. Returns the Command(resume=...) value on resume.
+    """Pause here until Command(resume=decision) is issued.
 
-    Nodes re-run from the top after resume; we reuse the open span id when this
-    process is still alive. A new process starts/ends a short span instead.
-    Sink errors never fail the task.
+    First visit: interrupt() raises GraphInterrupt → graph stops.
+    After resume: this function runs again from the top, then interrupt()
+    *returns* the human's string instead of pausing.
     """
     active = sink if sink is not None else (_current_sink.get() or _get_sink())
-    span_id = _open_hitl_spans.get(task_id)
+    span_key = f"{task_id}:{name}"
+    span_id = _open_hitl_spans.get(span_key)
     if span_id is None:
         try:
             span_id = active.start_span(
                 kind="hitl",
-                name="design_approval",
+                name=name,
                 task_id=task_id,
-                phase="design",
-                attributes={"reason": DESIGN_APPROVAL_PAYLOAD["reason"]},
+                phase=phase,
+                attributes={"reason": str(payload.get("reason") or name)},
             )
-            _open_hitl_spans[task_id] = span_id
+            _open_hitl_spans[span_key] = span_id
         except Exception:
             span_id = "hitl-error"
-    decision = interrupt(DESIGN_APPROVAL_PAYLOAD)
+    # This is the actual pause. Everything above re-runs after resume.
+    decision = interrupt(payload)
     try:
         active.end_span(
             span_id,
@@ -62,8 +69,23 @@ def interrupt_for_design_approval(
         )
     except Exception:
         pass
-    _open_hitl_spans.pop(task_id, None)
+    _open_hitl_spans.pop(span_key, None)
     return str(decision)
+
+
+def interrupt_for_design_approval(
+    task_id: str,
+    *,
+    sink: TelemetrySink | None = None,
+) -> str:
+    """Phase 01 stub pause. Real checkpoints use ApprovalGate + hitl_log."""
+    return interrupt_with_span(
+        task_id,
+        DESIGN_APPROVAL_PAYLOAD,
+        name="design_approval",
+        phase="design",
+        sink=sink,
+    )
 
 
 def bind_telemetry_sink(sink: TelemetrySink | None) -> Token:

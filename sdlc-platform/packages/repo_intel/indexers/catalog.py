@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import pathspec
 
 from common.config import get_settings
+from repo_intel.models import CatalogDiff
 
 # ~1 MiB. Larger files are excluded from the eligible set (not cataloged).
 MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024
@@ -129,6 +131,105 @@ def _is_ignored(spec: pathspec.PathSpec | None, relative_posix: str, is_dir: boo
     return bool(is_dir and spec.match_file(relative_posix.rstrip("/") + "/"))
 
 
+def _snapshot_if_eligible(
+    repo_root: Path,
+    path: Path,
+    ignore_spec: pathspec.PathSpec | None,
+) -> FileSnapshot | None:
+    """Read one path if it is an eligible source file. None means skip (not missing-as-error)."""
+    if path.is_symlink() or not path.is_file():
+        return None
+    language = language_for_path(path)
+    if language is None:
+        return None
+    try:
+        relative_path = posix_relative(repo_root, path)
+    except ValueError:
+        return None
+    if _is_ignored(ignore_spec, relative_path, is_dir=False):
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if stat.st_size > MAX_FILE_SIZE_BYTES:
+        return None
+    try:
+        content = path.read_bytes()
+    except OSError:
+        return None
+    if len(content) > MAX_FILE_SIZE_BYTES:
+        return None
+    return FileSnapshot(
+        relative_path=relative_path,
+        content_hash=sha256_bytes(content),
+        size_bytes=len(content),
+        mtime_ns=stat.st_mtime_ns,
+        language=language,
+        content=content,
+    )
+
+
+def read_paths(repo_root: Path | str, relative_paths: Sequence[str]) -> list[FileSnapshot]:
+    """Read only the requested relative paths (same eligibility rules as `walk_working_tree`).
+
+    Missing, ignored, oversized, unsupported, or escaped paths are omitted — not an error.
+    `reembed_paths` treats omitted requested paths as deletes.
+    """
+    root = resolve_repo_root(repo_root)
+    ignore_spec = _load_gitignore(root)
+    snapshots: list[FileSnapshot] = []
+    seen: set[str] = set()
+    for raw in relative_paths:
+        relative = raw.replace("\\", "/").strip()
+        if not relative or relative in seen:
+            continue
+        seen.add(relative)
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        snapshot = _snapshot_if_eligible(root, candidate, ignore_spec)
+        if snapshot is not None:
+            snapshots.append(snapshot)
+    snapshots.sort(key=lambda item: item.relative_path)
+    return snapshots
+
+
+def diff_snapshots(
+    snapshots: Sequence[FileSnapshot],
+    catalog: Mapping[str, str],
+    *,
+    scope: Collection[str] | None = None,
+) -> CatalogDiff:
+    """Compare working-tree snapshots to `{relative_path: content_hash}` from the catalog.
+
+    Pure function — no disk, no DB, so Section 05 can unit-test the change set.
+
+    `scope` limits the comparison to a path subset (used by `reindex_paths`), so a
+    file that is dirty elsewhere in the tree is not reported as deleted here.
+    """
+    on_disk = {snapshot.relative_path: snapshot.content_hash for snapshot in snapshots}
+    known = set(catalog) if scope is None else {path for path in catalog if path in scope}
+
+    created: list[str] = []
+    modified: list[str] = []
+    unchanged = 0
+    for path, digest in sorted(on_disk.items()):
+        previous = catalog.get(path)
+        if previous is None:
+            created.append(path)
+        elif previous != digest:
+            modified.append(path)
+        else:
+            unchanged += 1
+    deleted = sorted(path for path in known if path not in on_disk)
+    return CatalogDiff(
+        created=created, modified=modified, deleted=deleted, unchanged=unchanged
+    )
+
+
 def walk_working_tree(repo_root: Path | str) -> list[FileSnapshot]:
     """Read every eligible source file under `repo_root` and SHA-256 its bytes.
 
@@ -154,37 +255,9 @@ def walk_working_tree(repo_root: Path | str) -> list[FileSnapshot]:
         dirnames[:] = sorted(kept_dirs)
 
         for name in filenames:
-            path = current / name
-            if path.is_symlink():
-                continue
-            language = language_for_path(path)
-            if language is None:
-                continue
-            relative_path = posix_relative(root, path)
-            if _is_ignored(ignore_spec, relative_path, is_dir=False):
-                continue
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            if stat.st_size > MAX_FILE_SIZE_BYTES:
-                continue
-            try:
-                content = path.read_bytes()
-            except OSError:
-                continue
-            if len(content) > MAX_FILE_SIZE_BYTES:
-                continue
-            snapshots.append(
-                FileSnapshot(
-                    relative_path=relative_path,
-                    content_hash=sha256_bytes(content),
-                    size_bytes=len(content),
-                    mtime_ns=stat.st_mtime_ns,
-                    language=language,
-                    content=content,
-                )
-            )
+            snapshot = _snapshot_if_eligible(root, current / name, ignore_spec)
+            if snapshot is not None:
+                snapshots.append(snapshot)
 
     snapshots.sort(key=lambda item: item.relative_path)
     return snapshots
