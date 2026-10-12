@@ -1,6 +1,6 @@
 # Phase 05 LLM map (short)
 
-The **full beginner picture** of the system — 8 SDLC steps, where we ask you for requirements, and where a DAG chooses series vs parallel — is here:
+The **IEEE-style system description** — system-flow figures for the lifecycle, runtime composition, and communication channels — is here:
 
 **[docs/system-overview.md](../../system-overview.md)**
 
